@@ -34,6 +34,7 @@ class VPGDiffusion(DiffusionModel):
         ft_denoising_steps_d=0,
         ft_denoising_steps_t=0,
         network_path=None,
+        critic_path=None,  # NEW: Support loading pretrained critic
         # modifying denoising schedule
         min_sampling_denoising_std=0.1,
         min_logprob_denoising_std=0.1,
@@ -89,13 +90,42 @@ class VPGDiffusion(DiffusionModel):
 
         # Value function
         self.critic = critic.to(self.device)
+        # Note: critic loading from network_path is skipped for MPI checkpoints
+        # as MPI policy checkpoints don't contain critic weights.
+        # Use critic_path parameter for loading MPI value network checkpoints.
         if network_path is not None:
+            # Use weights_only=False for MPI checkpoints that contain OmegaConf data
             checkpoint = torch.load(
-                network_path, map_location=self.device, weights_only=True
+                network_path, map_location=self.device, weights_only=False
             )
-            if "ema" not in checkpoint:  # load trained RL model
+            # Only load critic from network_path if it's a DPPO-format checkpoint
+            if "model" in checkpoint and "ema" not in checkpoint:  # load trained RL model
                 self.load_state_dict(checkpoint["model"], strict=False)
                 logging.info("Loaded critic from %s", network_path)
+            elif "state_dicts" in checkpoint:
+                # MPI format - skip critic loading (no critic in policy checkpoint)
+                logging.info("MPI checkpoint detected - skipping critic loading from network_path")
+        
+        # NEW: Support loading pretrained critic from separate checkpoint
+        if critic_path is not None:
+            # Use weights_only=False for MPI value network checkpoints
+            critic_checkpoint = torch.load(
+                critic_path, map_location=self.device, weights_only=False
+            )
+            # Handle different checkpoint formats
+            if "model" in critic_checkpoint:
+                # Standard checkpoint format
+                self.critic.load_state_dict(critic_checkpoint["model"], strict=False)
+            elif "model_state_dict" in critic_checkpoint:
+                # MPI value network checkpoint format
+                self.critic.load_state_dict(critic_checkpoint["model_state_dict"], strict=False)
+            elif "state_dict" in critic_checkpoint:
+                # Lightning checkpoint format
+                self.critic.load_state_dict(critic_checkpoint["state_dict"], strict=False)
+            else:
+                # Direct state dict
+                self.critic.load_state_dict(critic_checkpoint, strict=False)
+            logging.info("Loaded pretrained critic from %s", critic_path)
 
     # ---------- Sampling ----------#
 

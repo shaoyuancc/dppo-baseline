@@ -16,6 +16,15 @@ log = logging.getLogger(__name__)
 from env.gym_utils import make_async
 
 
+def _try_import_linear_normalizer():
+    """Try to import LinearNormalizer from mpi repo."""
+    try:
+        from diffusion_policy.model.common.normalizer import LinearNormalizer
+        return LinearNormalizer
+    except ImportError:
+        return None
+
+
 class TrainAgent:
 
     def __init__(self, cfg):
@@ -40,6 +49,12 @@ class TrainAgent:
         # Make vectorized env
         self.env_name = cfg.env.name
         env_type = cfg.env.get("env_type", None)
+        # Resolve OmegaConf interpolations before passing to make_async
+        # This ensures ${act_steps} etc. are resolved to actual values
+        env_specific = {}
+        if "specific" in cfg.env:
+            env_specific = OmegaConf.to_container(cfg.env.specific, resolve=True)
+        
         self.venv = make_async(
             cfg.env.name,
             env_type=env_type,
@@ -54,7 +69,7 @@ class TrainAgent:
             render_offscreen=cfg.env.get("save_video", False),
             obs_dim=cfg.obs_dim,
             action_dim=cfg.action_dim,
-            **cfg.env.specific if "specific" in cfg.env else {},
+            **env_specific,
         )
         if not env_type == "furniture":
             self.venv.seed(
@@ -81,6 +96,23 @@ class TrainAgent:
 
         # Build model and load checkpoint
         self.model = hydra.utils.instantiate(cfg.model)
+
+        # Load and freeze normalizers from pretrained checkpoints if specified
+        # Policy and critic need separate normalizers because they have different output spaces:
+        # - Policy normalizer: normalizes observations and ACTIONS (robot joint positions/velocities)
+        # - Critic normalizer: normalizes observations and VALUES (scalar reward estimates)
+        self.policy_normalizer = None
+        self.critic_normalizer = None
+        
+        policy_normalizer_path = cfg.get("policy_normalizer_path")
+        if policy_normalizer_path is not None:
+            self.policy_normalizer = self._load_normalizer(policy_normalizer_path)
+            log.info(f"Loaded policy normalizer from {policy_normalizer_path}")
+        
+        critic_normalizer_path = cfg.get("critic_normalizer_path")
+        if critic_normalizer_path is not None:
+            self.critic_normalizer = self._load_normalizer(critic_normalizer_path)
+            log.info(f"Loaded critic normalizer from {critic_normalizer_path}")
 
         # Training params
         self.itr = 0
@@ -120,6 +152,55 @@ class TrainAgent:
 
     def run(self):
         pass
+
+    def _load_normalizer(self, path):
+        """
+        Load LinearNormalizer from mpi checkpoint.
+        
+        The normalizer is frozen (no gradient updates) during fine-tuning
+        to maintain consistency with pre-training.
+        """
+        LinearNormalizer = _try_import_linear_normalizer()
+        if LinearNormalizer is None:
+            raise ImportError(
+                "Cannot load normalizer: diffusion_policy.model.common.normalizer "
+                "is not available. Make sure motion-policy-improvement is installed."
+            )
+        
+        # Use weights_only=False for MPI normalizer checkpoints that contain custom classes
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        
+        # Handle different checkpoint formats
+        if isinstance(checkpoint, LinearNormalizer):
+            # MPI saves the normalizer directly as a LinearNormalizer object
+            normalizer = checkpoint
+        elif isinstance(checkpoint, dict):
+            # Create normalizer and load state
+            normalizer = LinearNormalizer()
+            if "normalizer" in checkpoint:
+                normalizer.load_state_dict(checkpoint["normalizer"])
+            elif "state_dict" in checkpoint:
+                # Lightning format - normalizer might be nested
+                state_dict = checkpoint["state_dict"]
+                normalizer_state = {
+                    k.replace("normalizer.", ""): v
+                    for k, v in state_dict.items()
+                    if k.startswith("normalizer.")
+                }
+                if normalizer_state:
+                    normalizer.load_state_dict(normalizer_state)
+            else:
+                # Direct state dict format
+                normalizer.load_state_dict(checkpoint)
+        else:
+            raise ValueError(f"Unknown normalizer checkpoint format: {type(checkpoint)}")
+        
+        # Freeze normalizer parameters
+        for param in normalizer.parameters():
+            param.requires_grad = False
+        normalizer.eval()
+        
+        return normalizer.to(self.device)
 
     def save_model(self):
         """

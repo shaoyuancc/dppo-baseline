@@ -53,8 +53,10 @@ class VitEncoder(nn.Module):
         self.repr_dim = self.cfg.embed_dim * self.vit.num_patches
 
     def forward(self, obs, flatten=False) -> torch.Tensor:
-        # assert obs.max() > 5
-        obs = obs / 255.0 - 0.5
+        # Normalize from [0, 1] to [-0.5, 0.5]
+        # Note: MPI/truck_2d data pipeline stores images normalized to [0, 1]
+        # (Changed from original DPPO which expected [0, 255] and did: obs / 255.0 - 0.5)
+        obs = obs - 0.5
         feats: torch.Tensor = self.vit.forward(obs)
         if flatten:
             feats = feats.flatten(1, 2)
@@ -66,7 +68,9 @@ class PatchEmbed1(nn.Module):
         super().__init__()
         self.conv = nn.Conv2d(num_channel, embed_dim, kernel_size=8, stride=8)
 
-        self.num_patch = math.ceil(img_h / 8) * math.ceil(img_w / 8)
+        # Use floor division to match PyTorch conv2d output size calculation
+        # output_size = floor((input_size - kernel_size) / stride) + 1
+        self.num_patch = (img_h // 8) * (img_w // 8)
         self.patch_dim = embed_dim
 
     def forward(self, x: torch.Tensor):
@@ -86,10 +90,12 @@ class PatchEmbed2(nn.Module):
         ]
         self.embed = nn.Sequential(*layers)
 
-        H1 = math.ceil((img_h - 8) / 4) + 1
-        W1 = math.ceil((img_w - 8) / 4) + 1
-        H2 = math.ceil((H1 - 3) / 2) + 1
-        W2 = math.ceil((W1 - 3) / 2) + 1
+        # Use floor division to match PyTorch conv2d output size calculation
+        # output_size = floor((input_size - kernel_size) / stride) + 1
+        H1 = (img_h - 8) // 4 + 1
+        W1 = (img_w - 8) // 4 + 1
+        H2 = (H1 - 3) // 2 + 1
+        W2 = (W1 - 3) // 2 + 1
         self.num_patch = H2 * W2
         self.patch_dim = embed_dim
 
@@ -264,6 +270,7 @@ if __name__ == "__main__":
     )
 
     print(enc)
-    x = torch.rand(1, *obs_shape) * 255
+    # Images in [0, 1] range (MPI/truck_2d convention)
+    x = torch.rand(1, *obs_shape)
     print("output size:", enc(x, flatten=False).size())
     print("repr dim:", enc.repr_dim, ", real dim:", enc(x, flatten=True).size())

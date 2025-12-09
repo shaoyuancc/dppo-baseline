@@ -66,6 +66,7 @@ class PPODiffusion(VPGDiffusion):
         oldlogprobs,
         use_bc_loss=False,
         reward_horizon=4,
+        critic_obs=None,  # Optional: separate observations for critic (e.g., single-frame)
     ):
         """
         PPO loss
@@ -174,7 +175,9 @@ class PPODiffusion(VPGDiffusion):
         pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
         # Value loss optionally with clipping
-        newvalues = self.critic(obs).view(-1)
+        # Use critic_obs if provided (allows different obs format for critic)
+        critic_input = critic_obs if critic_obs is not None else obs
+        newvalues = self.critic(critic_input).view(-1)
         if self.clip_vloss_coef is not None:
             v_loss_unclipped = (newvalues - returns) ** 2
             v_clipped = oldvalues + torch.clamp(

@@ -135,24 +135,46 @@ class MultiStep(gym.Wrapper):
     def step(self, action):
         """
         actions: (n_action_steps,) + action_shape
+        
+        If the underlying environment has full_trajectory_mode=True, passes
+        the full action array at once for smooth trajectory generation (like MPI).
+        Otherwise, iterates through actions one at a time (original behavior).
         """
         if action.ndim == 1:  # in case action_steps = 1
             action = action[None]
+        
+        # Check if underlying env has full_trajectory_mode enabled
+        # This passes all actions at once for smooth trajectory generation
+        full_traj_mode = getattr(self.env, '_full_trajectory_mode', False)
+        
         truncated = False
         terminated = False
-        for act_step, act in enumerate(action):
-            self.cnt += 1
-            if terminated or truncated:
-                break
-
-            # done does not differentiate terminal and truncation
-            observation, reward, done, info = self.env.step(act)
-
-            self.obs.append(observation)
-            self.action.append(act)
+        
+        if full_traj_mode:
+            # FULL TRAJECTORY MODE: Pass all actions at once to create smooth trajectory
+            # This matches MPI's model_inferer behavior
+            observations, reward, done, info = self.env.step(action)
+            
+            # IMPORTANT: Increment cnt by actual steps executed, not len(action)!
+            # The env receives full horizon (e.g., 32 steps) but only executes act_steps (e.g., 20).
+            # The environment reports actual steps via 'n_steps_executed' in info.
+            n_steps_executed = info.get('n_steps_executed', len(observations))
+            self.cnt += n_steps_executed
+            
+            # obs_shapes = {k: v.shape for k, v in observations[0].items()}
+            # print(f"multi_step full_traj_mode: received {len(observations)} observations, "
+            #       f"n_steps_executed={n_steps_executed}, first obs shapes={obs_shapes}")
+            
+            # Extend observation history with all received observations
+            # This allows _get_obs to correctly get the last n_obs_steps
+            self.obs.extend(observations)
+            self.action.extend(action[:n_steps_executed])
+            
+            # Append individual rewards for each step (reward is the sum, so distribute or use sum)
+            # For compatibility with reward aggregation, append the total reward once
             self.reward.append(reward)
             
-            # in gym, timelimit wrapper is automatically used given env._spec.max_episode_steps
+            # Check termination
             if "TimeLimit.truncated" not in info:
                 if done:
                     terminated = True
@@ -163,9 +185,40 @@ class MultiStep(gym.Wrapper):
             else:
                 truncated = info["TimeLimit.truncated"]
                 terminated = done
+            
             done = truncated or terminated
             self.done.append(done)
             self._add_info(info)
+            act_step = n_steps_executed - 1  # For compatibility with pass_full_observations
+        else:
+            # ORIGINAL BEHAVIOR: Iterate through actions one at a time
+            for act_step, act in enumerate(action):
+                self.cnt += 1
+                if terminated or truncated:
+                    break
+
+                # done does not differentiate terminal and truncation
+                observation, reward, done, info = self.env.step(act)
+
+                self.obs.append(observation)
+                self.action.append(act)
+                self.reward.append(reward)
+                
+                # in gym, timelimit wrapper is automatically used given env._spec.max_episode_steps
+                if "TimeLimit.truncated" not in info:
+                    if done:
+                        terminated = True
+                    elif (
+                        self.max_episode_steps is not None
+                    ) and self.cnt >= self.max_episode_steps:
+                        truncated = True
+                else:
+                    truncated = info["TimeLimit.truncated"]
+                    terminated = done
+                done = truncated or terminated
+                self.done.append(done)
+                self._add_info(info)
+        
         observation = self._get_obs(self.n_obs_steps)
         reward = aggregate(self.reward, self.reward_agg_method)
         done = aggregate(self.done, "max")
@@ -189,6 +242,10 @@ class MultiStep(gym.Wrapper):
         # reset reward and done for next step
         self.reward = list()
         self.done = list()
+        # final_obs_shapes = {k: v.shape for k, v in observation.items()}
+        # print(f"multi_step end: n_obs_steps={self.n_obs_steps}, "
+        #       f"observation shapes={final_obs_shapes}, "
+        #       f"full_traj_mode={full_traj_mode}")
         return observation, reward, terminated, truncated, info
 
     def _get_obs(self, n_steps=1):

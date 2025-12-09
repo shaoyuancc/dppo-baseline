@@ -1,0 +1,241 @@
+# Small integration test config for DPPO training on truck_2d
+# Usage (from dppo-baseline directory):
+#   python script/run.py --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_diffusion_truck_2d_test
+# Usage (from motion-policy-improvement directory):
+#   poetry run python ../dppo-baseline/script/run.py --config-path=../dppo-baseline/cfg/truck_2d --config-name=ft_ppo_diffusion_truck_2d_test base_policy_path=<path_to_checkpoint.ckpt>
+# 
+# This is a minimal test config with:
+# - Only 3 environments
+# - Only 7 training iterations  
+# - n_steps=30 per iteration
+# - Initializes from expert iteration checkpoints
+
+defaults:
+  - _self_
+
+hydra:
+  run:
+    dir: ${logdir}
+  job_logging:
+    loggers:
+      matplotlib.axes._base:
+        level: ERROR # Suppress "Ignoring fixed y limits to fulfill fixed data aspect with adjustable data limits."
+      # Enable DEBUG logging for truck_2d components (set to INFO to reduce verbosity)
+      agent.finetune.train_ppo_diffusion_truck2d_agent:
+        level: DEBUG
+      dppo_baseline.env.truck_2d_env:
+        level: DEBUG
+
+_target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
+
+name: truck_2d_ft_test
+logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-finetune/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+
+# Pretrained model paths - set these for initialization
+# Path to pretrained policy checkpoint (.ckpt)
+base_policy_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-12-08/20-17-32_base_policy_val_networks_5K_4box_singleout_vit/iterations/0/policy_training/checkpoints/latest.ckpt
+# Optional: Path to pretrained critic checkpoint (.pt)
+critic_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-12-08/20-17-32_base_policy_val_networks_5K_4box_singleout_vit/iterations/0/value_network_training/checkpoints/latest.pt
+# Normalizer paths - policy and critic need separate normalizers for different output spaces:
+# - Policy normalizer: normalizes observations and ACTIONS (robot joint positions)
+# - Critic normalizer: normalizes observations and VALUES (scalar reward estimates)
+policy_normalizer_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-12-08/20-17-32_base_policy_val_networks_5K_4box_singleout_vit/iterations/0/policy_training/normalizer.pt
+critic_normalizer_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-12-08/20-17-32_base_policy_val_networks_5K_4box_singleout_vit/iterations/0/value_network_training/value_network_normalizer.pt
+
+seed: 42
+device: cuda:0
+env_name: truck_2d
+obs_dim: 6  # 4 joints + suction_cmd + is_suctioned
+action_dim: 5  # 4 joints + suction command
+denoising_steps: 100
+ft_denoising_steps: 10
+cond_steps: 2  # Number of observation history steps
+img_cond_steps: 2  # Number of image history steps for policy
+# Critic-specific settings to match MPI value network architecture
+# MPI value network uses single-frame observations (n_obs_steps=1)
+# These settings allow loading MPI value network checkpoints
+critic_img_cond_steps: 1  # MPI value network uses 1 frame
+critic_n_obs_steps: 1  # MPI value network uses 1 observation step
+horizon_steps: 32  # Action chunk size
+act_steps: 20  # Action execution steps
+use_ddim: False
+
+# DEBUG: Use MPI model directly for inference instead of DPPO model
+# This helps verify if the issue is with model loading or inference
+use_mpi_model_for_debug: true
+policy_checkpoint_path: ${base_policy_path}  # For MPI model debugging
+
+env:
+  n_envs: 3  # SMALL: Only 3 environments for testing
+  name: ${env_name}
+  env_type: truck_2d
+  best_reward_threshold_for_success: -80.0
+  max_episode_steps: 100  # This is the number of environment steps per iteration (so max_episode_steps * control_timestep is the max duration in seconds of an episode)
+  save_video: False
+  # Truck_2d specific metrics (used by training agent)
+  save_meshcat: True  # Enable meshcat saving
+  approx_n_meshcats_saved: 10  # Save ~2 meshcats per iteration
+  # Environment-specific kwargs (passed to TruckUnload2DEnv via make_async)
+  specific:
+    problem_file: "/home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl"
+    problem_index_range: [0, 1000]  # Small range for testing
+    control_timestep: 0.1
+    physics_timestep: 0.002  # Match MPI's plant_config.time_step: 0.002
+    # CRITICAL: Match MPI's init_x=1.0 (robot lateral starting position)
+    # The policy was trained with data from init_x=1.0, so the robot must start there
+    init_x: 1.0
+    # Limit number of boxes per problem (null for no limit)
+    max_boxes: 1
+    # Match MPI's failure detection settings:
+    # - MPI has enable_penetration_failure: false (allows some penetration)
+    # - MPI uses max_penetration_distance: 0.1 (more permissive)
+    enable_tracking_failure: false
+    enable_penetration_failure: true
+    max_penetration_distance: 0.1  # Match MPI: 0.1 (more permissive threshold)
+    # DEBUG: Enable full trajectory mode to test smooth motion like MPI
+    # When true, step() accepts full action sequence and creates ONE smooth trajectory
+    full_trajectory_mode: false
+    # Number of steps to execute (matches act_steps). Trajectory uses full horizon
+    # for smooth velocity at boundaries, but only act_steps are simulated.
+    act_steps: ${act_steps}
+    # CRITICAL: Set normalize_actions=False because the DPPO agent handles
+    # action unnormalization using the MPI LinearNormalizer (policy_normalizer_path)
+    # The environment receives raw joint positions directly
+    normalize_actions: false
+    # Reward configuration
+    reward_config:
+      step_reward: -0.1      # Reward per step (encourages efficiency)
+      failure_reward: -80.0  # Reward for penetration/tracking failure
+      success_reward: 0.0    # Reward for completing all boxes
+  wrappers:
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: True
+
+shape_meta:
+  obs:
+    rgb:
+      shape: [1, 71, 192]  # Grayscale depth image
+    state:
+      shape: [6]  # 4 joints + suction_cmd + is_suctioned
+  action:
+    shape: [5]  # 4 joints + suction command
+
+wandb:
+  entity: ${oc.env:DPPO_WANDB_ENTITY,contact_placement}
+  project: truck_2d-finetune-test
+  run: ${now:%H-%M-%S}_${name}
+
+train:
+  n_train_itr: 2  # SMALL: Only 7 iterations for testing
+  n_critic_warmup_itr: 1  # Reduced warmup
+  n_steps: 50  # This is the number of policy steps per iteration (so n_steps * act_steps is the number of environment steps)
+  gamma: 0.999
+  augment: False  # Disabled for grayscale non-square images
+  grad_accumulate: 4  # Reduced for smaller batches
+  actor_lr: 5e-5
+  actor_weight_decay: 0
+  actor_lr_scheduler:
+    first_cycle_steps: ${train.n_train_itr}
+    warmup_steps: 0
+    min_lr: 5e-5
+  critic_lr: 1e-3
+  critic_weight_decay: 0
+  critic_lr_scheduler:
+    first_cycle_steps: ${train.n_train_itr}
+    warmup_steps: 0
+    min_lr: 1e-3
+  save_model_freq: 3  # Save frequently for testing
+  val_freq: 2  # Validate frequently for testing
+  render:
+    freq: 1
+    num: 0
+  # PPO specific
+  reward_scale_running: True
+  reward_scale_const: 1.0
+  gae_lambda: 0.95
+  batch_size: 30  # Smaller batch for testing (must be divisible by n_envs=3)
+  logprob_batch_size: 30  # Must be divisible by n_envs
+  update_epochs: 5  # Fewer epochs for testing
+  vf_coef: 0.5
+  target_kl: 1
+
+model:
+  _target_: model.diffusion.diffusion_ppo.PPODiffusion
+  gamma_denoising: 0.99
+  clip_ploss_coef: 0.01
+  clip_ploss_coef_base: 0.001
+  clip_ploss_coef_rate: 3
+  randn_clip_value: 3
+  min_sampling_denoising_std: 0.1
+  min_logprob_denoising_std: 0.1
+  use_ddim: ${use_ddim}
+  ddim_steps: ${ft_denoising_steps}
+  learn_eta: False
+  eta:
+    base_eta: 1
+    input_dim: ${obs_dim}
+    mlp_dims: [256, 256]
+    action_dim: ${action_dim}
+    min_eta: 0.1
+    max_eta: 1.0
+    _target_: model.diffusion.eta.EtaFixed
+  network_path: ${base_policy_path}
+  critic_path: ${critic_path}
+  actor:
+    _target_: model.diffusion.unet.VisionUnet1D
+    backbone:
+      _target_: model.common.vit.VitEncoder
+      obs_shape: ${shape_meta.obs.rgb.shape}
+      num_channel: ${eval:'1 * ${img_cond_steps}'}
+      img_h: ${shape_meta.obs.rgb.shape[1]}
+      img_w: ${shape_meta.obs.rgb.shape[2]}
+      cfg:
+        patch_size: 8
+        depth: 2
+        embed_dim: 128
+        num_heads: 4
+        embed_style: embed2
+        embed_norm: 0
+    img_cond_steps: ${img_cond_steps}
+    augment: False
+    spatial_emb: 128
+    diffusion_step_embed_dim: 64  # Match MPI: diffusion_step_embed_dim=64
+    dim: 64  # Match MPI: unet_dim=64
+    dim_mults: [1, 2, 4]  # Match MPI: unet_dim_mults=[1, 2, 4]
+    kernel_size: 5
+    n_groups: 8
+    smaller_encoder: False
+    cond_predict_scale: True
+    action_dim: ${action_dim}
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+  critic:
+    _target_: model.common.critic.ViTCritic
+    spatial_emb: 128
+    augment: False
+    backbone:
+      _target_: model.common.vit.VitEncoder
+      obs_shape: ${shape_meta.obs.rgb.shape}
+      num_channel: ${eval:'1 * ${critic_img_cond_steps}'}  # Single frame for MPI compat
+      img_h: ${shape_meta.obs.rgb.shape[1]}
+      img_w: ${shape_meta.obs.rgb.shape[2]}
+      cfg:
+        patch_size: 8
+        depth: 2
+        embed_dim: 128
+        num_heads: 4
+        embed_style: embed2
+        embed_norm: 0
+    img_cond_steps: ${critic_img_cond_steps}  # Single frame for MPI compat
+    mlp_dims: [256, 256, 256]
+    activation_type: Mish
+    residual_style: True
+    cond_dim: ${eval:'${obs_dim} * ${critic_n_obs_steps}'}  # Single obs step for MPI compat
+  ft_denoising_steps: ${ft_denoising_steps}
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  denoising_steps: ${denoising_steps}
+  device: ${device}

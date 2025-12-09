@@ -1,3 +1,60 @@
+# Diffusion Policy Policy Optimization (DPPO) - Truck Unload 2D Fork
+
+> **This is a fork of DPPO adapted for the 2D truck unloading task with Drake simulation.**
+> 
+> Original repository: [irom-lab/dppo](https://github.com/irom-lab/dppo)
+
+## Fork Modifications
+
+This fork adds support for the truck_2d environment from the motion-policy-improvement project. The modifications enable:
+
+1. **Loading checkpoints from MPI expert iteration** for initializing DPPO fine-tuning
+2. **Single-frame critic** support to match MPI's value network architecture
+3. **Custom task metrics** (PPH, task completion) for truck unloading evaluation
+
+### Modified Files
+
+| File | Changes |
+|------|---------|
+| `script/run.py` | Made `pretty_errors` and `gdown` imports optional |
+| `model/diffusion/diffusion.py` | Added MPI checkpoint loading with key conversion (`module.policy.*` → `network.*`) |
+| `model/diffusion/diffusion_vpg.py` | Added MPI critic checkpoint format support (`model_state_dict` key) |
+| `model/diffusion/diffusion_ppo.py` | Added `critic_obs` parameter to `loss()` for single-frame critic |
+| `agent/finetune/train_agent.py` | Handle MPI normalizer format (saved as LinearNormalizer object directly) |
+| `env/gym_utils/__init__.py` | Added `truck_2d` environment type |
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `cfg/truck_2d/ft_ppo_diffusion_truck_2d.yaml` | Full DPPO config for truck_2d |
+| `cfg/truck_2d/ft_ppo_diffusion_truck_2d_test.yaml` | Small integration test config |
+| `agent/finetune/train_ppo_diffusion_truck2d_agent.py` | Custom agent with PPH/task completion metrics and single-frame critic preprocessing |
+
+### Key Configuration Options (truck_2d specific)
+
+```yaml
+# Enable single-frame critic (to load MPI value network checkpoints)
+critic_img_cond_steps: 1  # Number of image frames for critic (vs cond_steps for policy)
+critic_n_obs_steps: 1     # Number of observation steps for critic state
+
+# Checkpoint paths for loading from MPI training
+base_policy_path: /path/to/mpi/policy/latest.ckpt
+critic_path: /path/to/mpi/value_network/latest.pt
+normalizer_checkpoint_path: /path/to/mpi/normalizer.pt
+```
+
+### MPI Checkpoint Compatibility
+
+The fork handles these MPI checkpoint format differences:
+
+- **Policy checkpoints**: Keys prefixed with `module.policy.vit_encoder.vit.*` are converted to `network.backbone.*`
+- **Value network checkpoints**: Uses `model_state_dict` key instead of `model`
+- **Normalizer**: Loaded as `LinearNormalizer` object directly (not state_dict)
+- **OmegaConf**: Uses `weights_only=False` for `torch.load` due to embedded OmegaConf configs
+
+---
+
 # Diffusion Policy Policy Optimization (DPPO)
 
 [[Paper](https://arxiv.org/abs/2409.00588)]&nbsp;&nbsp;[[Website](https://diffusion-ppo.github.io/)]

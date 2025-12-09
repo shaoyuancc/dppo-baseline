@@ -27,6 +27,48 @@ Sample = namedtuple("Sample", "trajectories chains")
 
 
 class DiffusionModel(nn.Module):
+    
+    @staticmethod
+    def _convert_mpi_to_dppo_keys(mpi_state_dict):
+        """
+        Convert MPI checkpoint keys to DPPO format.
+        
+        MPI format (ViTDiffusionPolicy with VisionUnet1D model):
+        - module.policy.model.backbone.vit.* -> network.backbone.* (ViT backbone)
+        - module.policy.model.* -> network.* (rest of VisionUnet1D)
+        
+        Note: MPI also has module.policy.vit_encoder.* which is a separate
+        encoder used by NormalizedViTDiffusionPolicy, but we use the model's
+        internal backbone instead.
+        """
+        dppo_state_dict = {}
+        
+        for key, value in mpi_state_dict.items():
+            new_key = key
+            
+            # Skip normalizer keys and dummy variables
+            if 'normalizer' in key or '_dummy_variable' in key:
+                continue
+            
+            # Skip the external vit_encoder - use model's internal backbone instead
+            if 'vit_encoder' in key:
+                continue
+            
+            # Convert MPI policy.model keys to DPPO network keys
+            # MPI: module.policy.model.backbone.vit.* -> DPPO: network.backbone.*
+            # MPI: module.policy.model.* -> DPPO: network.*
+            if key.startswith('module.policy.model.'):
+                # Remove 'module.policy.model.' prefix, add 'network.'
+                new_key = key.replace('module.policy.model.', 'network.')
+                
+                # The backbone.vit.* should become backbone.*
+                # (DPPO's VisionUnet1D.backbone is the ViT directly, not wrapped)
+                if 'backbone.vit.' in new_key:
+                    new_key = new_key.replace('backbone.vit.', 'backbone.')
+                    
+            dppo_state_dict[new_key] = value
+            
+        return dppo_state_dict
 
     def __init__(
         self,
@@ -75,15 +117,39 @@ class DiffusionModel(nn.Module):
         # Set up models
         self.network = network.to(device)
         if network_path is not None:
+            # Use weights_only=False for MPI checkpoints that contain OmegaConf data
             checkpoint = torch.load(
-                network_path, map_location=device, weights_only=True
+                network_path, map_location=device, weights_only=False
             )
+            
+            # Handle different checkpoint formats
+            state_dict = None
             if "ema" in checkpoint:
-                self.load_state_dict(checkpoint["ema"], strict=False)
-                logging.info("Loaded SL-trained policy from %s", network_path)
+                # Standard DPPO format
+                state_dict = checkpoint["ema"]
+                logging.info("Loaded SL-trained policy from %s (DPPO format)", network_path)
+            elif "model" in checkpoint:
+                # Standard DPPO format (RL-trained)
+                state_dict = checkpoint["model"]
+                logging.info("Loaded RL-trained policy from %s (DPPO format)", network_path)
+            elif "state_dicts" in checkpoint:
+                # MPI checkpoint format
+                if "ema_model" in checkpoint["state_dicts"]:
+                    raw_state_dict = checkpoint["state_dicts"]["ema_model"]
+                elif "model" in checkpoint["state_dicts"]:
+                    raw_state_dict = checkpoint["state_dicts"]["model"]
+                else:
+                    raise ValueError(f"Unknown MPI checkpoint format: {checkpoint['state_dicts'].keys()}")
+                
+                # Convert MPI keys to DPPO keys
+                # MPI format: module.policy.vit_encoder.vit.* -> network.backbone.*
+                state_dict = self._convert_mpi_to_dppo_keys(raw_state_dict)
+                logging.info("Loaded policy from %s (MPI format)", network_path)
             else:
-                self.load_state_dict(checkpoint["model"], strict=False)
-                logging.info("Loaded RL-trained policy from %s", network_path)
+                raise ValueError(f"Unknown checkpoint format: {checkpoint.keys()}")
+            
+            if state_dict is not None:
+                self.load_state_dict(state_dict, strict=False)
         logging.info(
             f"Number of network parameters: {sum(p.numel() for p in self.parameters())}"
         )
