@@ -40,11 +40,12 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         
         # Truck_2d specific config
         self.save_meshcat = getattr(cfg.env, 'save_meshcat', False)
+        self.meshcat_save_freq = getattr(cfg.env, 'meshcat_save_freq', 1)  # Default: every iteration
         self.approx_n_meshcats_saved = getattr(cfg.env, 'approx_n_meshcats_saved', 0)
         self.meshcat_dir = os.path.join(self.logdir, 'meshcats')
         if self.save_meshcat:
             os.makedirs(self.meshcat_dir, exist_ok=True)
-            log.info(f"Meshcat saving enabled: will save ~{self.approx_n_meshcats_saved} per iteration to {self.meshcat_dir}")
+            log.info(f"Meshcat saving enabled: will save ~{self.approx_n_meshcats_saved} every {self.meshcat_save_freq} iterations to {self.meshcat_dir}")
             
         # Get control_timestep from config for timeout duration calculation in metrics
         # This is used to compute the actual episode timeout duration in seconds
@@ -412,8 +413,9 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     )
             
             # Select random environments to save meshcats for this iteration
+            # Only save meshcats at the specified frequency (like render.freq)
             meshcat_env_indices = []
-            if self.save_meshcat and self.approx_n_meshcats_saved > 0:
+            if self.save_meshcat and self.approx_n_meshcats_saved > 0 and self.itr % self.meshcat_save_freq == 0:
                 n_to_save = min(self.approx_n_meshcats_saved, self.n_envs)
                 meshcat_env_indices = list(np.random.choice(
                     self.n_envs, n_to_save, replace=False

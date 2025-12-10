@@ -66,6 +66,7 @@ env:
   max_episode_steps: 200
   save_video: false
   save_meshcat: true
+  meshcat_save_freq: 10  # Save meshcats every X iterations (like render.freq)
   approx_n_meshcats_saved: 100
   specific:
     problem_file: "/home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl"
