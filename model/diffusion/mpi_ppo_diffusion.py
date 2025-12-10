@@ -178,8 +178,8 @@ class MPIPPODiffusion(nn.Module):
         # Checkpoint paths
         policy_checkpoint_path: str,
         policy_normalizer_path: str,
-        critic_checkpoint_path: str,
-        critic_normalizer_path: str,
+        critic_checkpoint_path: str = None,
+        critic_normalizer_path: str = None,
         # Model params
         ft_denoising_steps: int = 10,
         denoising_steps: int = 100,
@@ -190,6 +190,9 @@ class MPIPPODiffusion(nn.Module):
         # Critic config
         critic_n_obs_steps: int = 1,
         critic_img_cond_steps: int = 1,
+        # Fresh critic option
+        use_pretrained_critic: bool = True,
+        critic: dict = None,  # Hydra config for fresh critic
         # PPO params
         gamma_denoising: float = 0.99,
         clip_ploss_coef: float = 0.01,
@@ -208,7 +211,9 @@ class MPIPPODiffusion(nn.Module):
         """
         Factory method to create MPIPPODiffusion from MPI checkpoint paths.
         
-        This is the intended way to instantiate via hydra config:
+        This is the intended way to instantiate via hydra config.
+        
+        Option 1 - Pretrained critic (default):
         
             model:
               _target_: model.diffusion.mpi_ppo_diffusion.MPIPPODiffusion.from_mpi_checkpoints
@@ -216,10 +221,29 @@ class MPIPPODiffusion(nn.Module):
               policy_normalizer_path: /path/to/normalizer.pt
               critic_checkpoint_path: /path/to/critic.pt  
               critic_normalizer_path: /path/to/critic_normalizer.pt
-              ft_denoising_steps: 10
+              use_pretrained_critic: true  # default
               ...
+              
+        Option 2 - Fresh critic (trained from scratch during PPO):
+        
+            model:
+              _target_: model.diffusion.mpi_ppo_diffusion.MPIPPODiffusion.from_mpi_checkpoints
+              policy_checkpoint_path: /path/to/policy.ckpt
+              policy_normalizer_path: /path/to/normalizer.pt
+              use_pretrained_critic: false
+              critic:
+                _target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork
+                img_shape: [1, 71, 192]
+                state_dim: 6
+                features_dim: 512
+              ...
+        
+        Args:
+            use_pretrained_critic: If True, load critic from checkpoint. If False, 
+                instantiate fresh critic from `critic` config.
+            critic: Hydra config dict for fresh critic (used when use_pretrained_critic=False)
         """
-        from model.common.mpi_critic_wrapper import MPICriticWrapper
+        from model.common.mpi_critic_wrapper import MPICriticWrapper, MPICriticWrapperFresh
         
         log.info("=" * 60)
         log.info("Loading MPI models for DPPO training")
@@ -233,25 +257,73 @@ class MPIPPODiffusion(nn.Module):
             device
         )
         
-        # Load MPI value network  
-        log.info(f"Loading MPI critic from {critic_checkpoint_path}")
-        mpi_value_network = cls._load_mpi_value_network(
-            critic_checkpoint_path,
-            critic_normalizer_path,
-            device
-        )
-        
-        # Wrap critic for DPPO interface
-        critic = MPICriticWrapper(
-            mpi_value_network=mpi_value_network,
-            n_obs_steps=critic_n_obs_steps,
-            img_cond_steps=critic_img_cond_steps,
-        )
+        # Load or create critic
+        if use_pretrained_critic:
+            # Option 1: Load pretrained MPI value network
+            if critic_checkpoint_path is None or critic_normalizer_path is None:
+                raise ValueError(
+                    "use_pretrained_critic=True requires critic_checkpoint_path and "
+                    "critic_normalizer_path to be specified"
+                )
+            log.info(f"Loading pretrained MPI critic from {critic_checkpoint_path}")
+            mpi_value_network = cls._load_mpi_value_network(
+                critic_checkpoint_path,
+                critic_normalizer_path,
+                device
+            )
+            
+            # Wrap critic for DPPO interface (uses internal normalizer)
+            wrapped_critic = MPICriticWrapper(
+                mpi_value_network=mpi_value_network,
+                n_obs_steps=critic_n_obs_steps,
+                img_cond_steps=critic_img_cond_steps,
+            )
+        else:
+            # Option 2: Create fresh critic from config
+            if critic is None:
+                raise ValueError(
+                    "use_pretrained_critic=False requires `critic` config to be specified. "
+                    "Example: critic._target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork"
+                )
+            log.info("Creating fresh critic from config (will be trained from scratch)")
+            
+            # Handle both cases: critic may be a config dict OR already instantiated by Hydra
+            if isinstance(critic, nn.Module):
+                # Hydra already instantiated the critic (due to recursive instantiation)
+                log.info(f"  Critic already instantiated: {type(critic).__name__}")
+                fresh_value_network = critic
+            else:
+                # Critic is a config dict, instantiate it
+                log.info(f"  Critic config: {critic}")
+                fresh_value_network = hydra.utils.instantiate(critic)
+            
+            fresh_value_network = fresh_value_network.to(device)
+            
+            # Set the policy normalizer on the fresh critic for observation normalization
+            # This ensures the critic sees the same normalized observations as the policy
+            if hasattr(fresh_value_network, 'set_normalizer'):
+                # Load policy normalizer and set it on the fresh critic
+                policy_normalizer = torch.load(
+                    policy_normalizer_path, map_location=device, weights_only=False
+                )
+                fresh_value_network.set_normalizer(policy_normalizer)
+                log.info("Set policy normalizer on fresh critic for observation normalization")
+            
+            # Wrap fresh critic for DPPO interface
+            wrapped_critic = MPICriticWrapperFresh(
+                mpi_value_network=fresh_value_network,
+                n_obs_steps=critic_n_obs_steps,
+                img_cond_steps=critic_img_cond_steps,
+            )
+            
+            n_critic_params = sum(p.numel() for p in fresh_value_network.parameters())
+            n_trainable = sum(p.numel() for p in fresh_value_network.parameters() if p.requires_grad)
+            log.info(f"Fresh critic: {n_critic_params} total params, {n_trainable} trainable")
         
         # Create and return instance
         return cls(
             mpi_policy=mpi_policy,
-            critic=critic,
+            critic=wrapped_critic,
             ft_denoising_steps=ft_denoising_steps,
             denoising_steps=denoising_steps,
             horizon_steps=horizon_steps,

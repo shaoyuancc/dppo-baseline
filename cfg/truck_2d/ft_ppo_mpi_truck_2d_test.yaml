@@ -141,8 +141,14 @@ model:
   _target_: model.diffusion.mpi_ppo_diffusion.MPIPPODiffusion.from_mpi_checkpoints
   policy_checkpoint_path: ${base_policy_path}
   policy_normalizer_path: ${policy_normalizer_path}
+  
+  # Pretrained critic configuration (default)
+  # Set use_pretrained_critic: false to train critic from scratch instead
+  # See ft_ppo_mpi_truck_2d_fresh_critic.yaml for fresh critic example
+  use_pretrained_critic: true
   critic_checkpoint_path: ${critic_path}
   critic_normalizer_path: ${critic_normalizer_path}
+  
   ft_denoising_steps: ${ft_denoising_steps}
   denoising_steps: ${denoising_steps}
   horizon_steps: ${horizon_steps}
