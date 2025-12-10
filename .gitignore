@@ -145,3 +145,5 @@ dmypy.json
 cfg/robomimic/*.sh
 
 *.out
+
+outputs/
