@@ -396,7 +396,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         cnt_train_step = 0
         last_itr_eval = False
         done_venv = np.zeros((1, self.n_envs))
-        
+
         while self.itr < self.n_train_itr:
             # Clear episode infos for this iteration
             self._episode_infos = []

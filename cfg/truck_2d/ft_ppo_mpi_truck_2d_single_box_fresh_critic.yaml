@@ -164,6 +164,7 @@ model:
     img_shape: [1, 71, 192]
     state_dim: 6
     features_dim: 512
+    use_tanh: false  # <-- IMPORTANT: Disable Tanh for PPO (need unbounded values)
   
   # Model architecture params
   ft_denoising_steps: ${ft_denoising_steps}
