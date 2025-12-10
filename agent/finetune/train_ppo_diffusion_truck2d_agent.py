@@ -46,6 +46,12 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             os.makedirs(self.meshcat_dir, exist_ok=True)
             log.info(f"Meshcat saving enabled: will save ~{self.approx_n_meshcats_saved} per iteration to {self.meshcat_dir}")
             
+        # Get control_timestep from config for timeout duration calculation in metrics
+        # This is used to compute the actual episode timeout duration in seconds
+        env_specific = getattr(cfg.env, 'specific', {})
+        self.control_timestep = env_specific.get('control_timestep', 0.1)
+        log.info(f"Control timestep for metrics: {self.control_timestep}s")
+            
         # Episode tracking for custom metrics
         self._episode_infos = []
         # Counter for meshcat saving
@@ -122,58 +128,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         
         log.info(f"[DEBUG] Saved {n_envs * n_timesteps} debug images to {debug_dir}")
     
-    def _normalize_observations(self, obs: dict) -> dict:
-        """
-        Normalize observations for the MPI/DPPO policy model.
-        
-        NOTE: This method is NOT used in the current implementation because
-        MPIPolicyActorWrapper._encode_obs handles normalization internally,
-        matching MPI's predict_action behavior. Calling this before model
-        inference would cause DOUBLE NORMALIZATION and incorrect outputs.
-        
-        This method is kept for reference/debugging purposes only.
-        
-        Args:
-            obs: Dict with 'rgb' [B, T, C, H, W] and 'state' [B, T, D] as torch tensors
-        
-        Returns:
-            Dict with normalized observations (same shapes as input)
-        """
-        if self.policy_normalizer is None:
-            log.warning("No policy normalizer - returning observations as-is!")
-            return obs
-        
-        normalized_obs = {}
-        
-        # RGB: pass through unchanged (already in [0, 1] range)
-        if 'rgb' in obs:
-            normalized_obs['rgb'] = obs['rgb']
-        
-        # Normalize state using robot_state key from MPI normalizer
-        if 'state' in obs:
-            state = obs['state']
-            original_shape = state.shape  # (B, T, D)
-            
-            # Flatten: (B, T, D) -> (B*T, D) for normalization
-            state_flat = state.reshape(-1, state.shape[-1])
-            
-            # The MPI normalizer uses 'robot_state' key, not 'state'
-            try:
-                normalized = self.policy_normalizer.normalize({'robot_state': state_flat})
-                normalized_state = normalized['robot_state']
-            except KeyError:
-                # Fallback: try 'state' key
-                try:
-                    normalized = self.policy_normalizer.normalize({'state': state_flat})
-                    normalized_state = normalized['state']
-                except KeyError:
-                    log.warning("Policy normalizer has no 'robot_state' or 'state' key - using raw state")
-                    normalized_state = state_flat
-            
-            # Reshape back to original shape: (B*T, D) -> (B, T, D)
-            normalized_obs['state'] = normalized_state.reshape(original_shape)
-        
-        return normalized_obs
+    
     
     def _unnormalize_actions(self, actions: np.ndarray) -> np.ndarray:
         """
@@ -255,36 +210,79 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 
         return critic_obs
         
-    def _compute_custom_metrics(self, info_venv, step: int = -1):
+    def _extract_terminal_info_value(self, value, use_terminal: bool = False):
+        """
+        Extract scalar value from potentially stacked info arrays.
+        
+        When vectorized envs auto-reset, info values can be arrays where:
+        - First element (index 0): from the NEW episode after reset
+        - Last element (index -1): from the TERMINATED episode
+        
+        Args:
+            value: The info value (could be scalar, numpy array, or other)
+            use_terminal: If True and value is array, use LAST element (terminal episode info)
+                         If False, use first element (new episode info)
+        
+        Returns:
+            Scalar value extracted from the array
+        """
+        if isinstance(value, np.ndarray):
+            if value.size == 1:
+                return value.item()
+            elif value.size > 1:
+                # Use last element for terminal info, first for new episode
+                return value[-1] if use_terminal else value[0]
+        return value
+    
+    def _compute_custom_metrics(self, info_venv, done_venv, step: int = -1):
         """
         Extract custom metrics from episode infos.
         
         Calculates:
         - avg_pieces_per_hour: Average PPH across completed episodes
         - avg_task_completion: Average task completion ratio
-        - success_rate_custom: Success rate based on environment status
+        - custom_success_rate: Success rate based on whether all boxes were removed
         
         Args:
             info_venv: List of info dicts from each environment
+            done_venv: Boolean array indicating which environments finished an episode
             step: Current step within iteration (for debug logging)
         """
         # Collect all completed episode infos from this step
         for env_idx, info in enumerate(info_venv):
-            # Convert status to string (might be numpy array from vectorized env)
-            status = info.get('status', 'unknown')
-            if isinstance(status, np.ndarray):
-                status = str(status.item()) if status.size == 1 else str(status[0])
+            episode_ended = bool(done_venv[env_idx])
             
-            # Extract numeric values safely
-            n_boxes_removed = info.get('n_boxes_removed', 0)
-            n_boxes_total = info.get('n_boxes_total', 0)
-            duration = info.get('duration', 0)
-            if isinstance(n_boxes_removed, np.ndarray):
-                n_boxes_removed = int(n_boxes_removed.item()) if n_boxes_removed.size == 1 else int(n_boxes_removed[0])
-            if isinstance(n_boxes_total, np.ndarray):
-                n_boxes_total = int(n_boxes_total.item()) if n_boxes_total.size == 1 else int(n_boxes_total[0])
-            if isinstance(duration, np.ndarray):
-                duration = float(duration.item()) if duration.size == 1 else float(duration[0])
+            # When episode ended, vectorized env auto-resets and info contains BOTH
+            # the terminal episode info AND the new episode info (stacked as arrays).
+            # We need to extract the TERMINAL episode info (last element) when done.
+            use_terminal = episode_ended
+            
+            # Extract values - use terminal info when episode ended
+            status = self._extract_terminal_info_value(
+                info.get('status', 'unknown'), use_terminal
+            )
+            if not isinstance(status, str):
+                status = str(status)
+            
+            n_boxes_removed = self._extract_terminal_info_value(
+                info.get('n_boxes_removed', 0), use_terminal
+            )
+            n_boxes_removed = int(n_boxes_removed) if n_boxes_removed is not None else 0
+            
+            n_boxes_total = self._extract_terminal_info_value(
+                info.get('n_boxes_total', 0), use_terminal
+            )
+            n_boxes_total = int(n_boxes_total) if n_boxes_total is not None else 0
+            
+            duration = self._extract_terminal_info_value(
+                info.get('duration', 0), use_terminal
+            )
+            duration = float(duration) if duration is not None else 0.0
+            
+            is_success = self._extract_terminal_info_value(
+                info.get('is_success', False), use_terminal
+            )
+            is_success = bool(is_success)
             
             # Debug log for every step to trace environment flow
             log.debug(
@@ -293,14 +291,9 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 f"duration={duration:.2f}s"
             )
             
-            # Check if episode ended (info has termination data)
-            if 'is_success' in info or status in ['success', 'timeout', 'penetration_fail', 'tracking_fail', 'no_simulation']:
+            # Only record episode info when the episode actually ended
+            if episode_ended:
                 self._episodes_this_iteration += 1
-                
-                # Extract is_success safely
-                is_success = info.get('is_success', False)
-                if isinstance(is_success, np.ndarray):
-                    is_success = bool(is_success.item()) if is_success.size == 1 else bool(is_success[0])
                 
                 ep_info = {
                     'env_idx': env_idx,
@@ -518,8 +511,8 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                         status = info_venv[env_ind].get("status", "unknown")
                         log.info(f"Episode ended for env {env_ind} with status: {status} (meshcat auto-saved)")
                 
-                # Track custom metrics from info
-                self._compute_custom_metrics(info_venv, step=step)
+                # Track custom metrics from info (only for episodes that ended)
+                self._compute_custom_metrics(info_venv, done_venv, step=step)
                 
                 for k in obs_trajs:
                     obs_trajs[k][step] = prev_obs_venv[k]
@@ -569,8 +562,9 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 log.info("[WARNING] No episode completed within the iteration!")
 
             # Compute custom truck_2d metrics
+            # timeout_duration = max_episode_steps * control_timestep (in seconds)
             custom_metrics = self._aggregate_custom_metrics(
-                timeout_duration=self.max_episode_steps * 0.1  # control_timestep
+                timeout_duration=self.max_episode_steps * self.control_timestep
             )
 
             # Update models (copied from parent class with minor modifications)
@@ -840,10 +834,11 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                                 "avg episode reward - eval": avg_episode_reward,
                                 "avg best reward - eval": avg_best_reward,
                                 "num episode - eval": num_episode_finished,
-                                # Custom metrics
+                                # Custom truck_2d metrics
                                 "avg_pieces_per_hour - eval": custom_metrics['avg_pieces_per_hour'],
                                 "avg_task_completion - eval": custom_metrics['avg_task_completion'],
                                 "custom_success_rate - eval": custom_metrics['custom_success_rate'],
+                                "n_episodes_completed - eval": custom_metrics['n_episodes_completed'],
                             },
                             step=self.itr,
                             commit=False,
@@ -876,10 +871,11 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                                 "diffusion - min sampling std": diffusion_min_sampling_std,
                                 "actor lr": self.actor_optimizer.param_groups[0]["lr"],
                                 "critic lr": self.critic_optimizer.param_groups[0]["lr"],
-                                # Custom metrics
+                                # Custom truck_2d metrics
                                 "avg_pieces_per_hour - train": custom_metrics['avg_pieces_per_hour'],
                                 "avg_task_completion - train": custom_metrics['avg_task_completion'],
                                 "custom_success_rate - train": custom_metrics['custom_success_rate'],
+                                "n_episodes_completed - train": custom_metrics['n_episodes_completed'],
                             },
                             step=self.itr,
                             commit=True,

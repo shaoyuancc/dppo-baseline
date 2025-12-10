@@ -55,7 +55,7 @@ use_ddim: false
 # Minimal Test Environment
 #==============================================================================
 env:
-  n_envs: 30
+  n_envs: 5
   name: ${env_name}
   env_type: truck_2d
   best_reward_threshold_for_success: -50.0
@@ -73,9 +73,9 @@ env:
     enable_tracking_failure: false
     enable_penetration_failure: true
     max_penetration_distance: 0.1
-    full_trajectory_mode: false
-    act_steps: ${act_steps}
-    normalize_actions: false
+    full_trajectory_mode: false # DEPRECATED
+    act_steps: ${act_steps} # DEPRECATED
+    normalize_actions: false 
     reward_config:
       step_reward: -0.1
       failure_reward: -80.0
@@ -102,7 +102,7 @@ wandb: null
 # Minimal Training
 #==============================================================================
 train:
-  n_train_itr: 1
+  n_train_itr: 3
   n_critic_warmup_itr: 1
   n_steps: 50
   gamma: 0.999
