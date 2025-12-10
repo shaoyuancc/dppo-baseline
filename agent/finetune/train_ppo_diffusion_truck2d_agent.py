@@ -481,7 +481,6 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                         .to(self.device)
                         for key in self.obs_dims
                     }
-                    log.info(f"before querying model: cond shape for all keys: {[cond[key].shape for key in cond.keys()]}")
                     # NOTE: Do NOT normalize here - MPIPolicyActorWrapper._encode_obs handles
                     # normalization internally, matching MPI's predict_action behavior.
                     # The training path (get_logprobs) also passes raw observations.
@@ -494,6 +493,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     output_venv = samples.trajectories.cpu().numpy()
                     chains_venv = samples.chains.cpu().numpy() if samples.chains is not None else None
                     action_venv = output_venv[:, : self.act_steps]
+                    
                     # CRITICAL: Unnormalize actions using MPI policy normalizer
                     # The diffusion model outputs normalized actions, but the environment
                     # expects raw joint positions (with normalize_actions=False)

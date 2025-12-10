@@ -28,9 +28,9 @@ logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-test/${name}/${now:%Y-%m-%d}
 #==============================================================================
 # MPI Checkpoint Paths
 #==============================================================================
-base_policy_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-08-07/20-39-40_train_truck_2d_diffusion_policy_5K_full_truck_point_contact_03-51-35_local/checkpoints/step_035000-val_loss_0.0091-val_ddim_mse_0.1280.ckpt
+base_policy_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/checkpoints/latest.ckpt
 critic_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-12-09/18-33-12_pre_post_training_integration_test_/iterations/1/value_network_training/checkpoints/latest.pt
-policy_normalizer_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-08-07/20-39-40_train_truck_2d_diffusion_policy_5K_full_truck_point_contact_03-51-35_local/normalizer.pt
+policy_normalizer_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/normalizer.pt
 critic_normalizer_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-12-09/18-33-12_pre_post_training_integration_test_/iterations/1/value_network_training/value_network_normalizer.pt
 
 #==============================================================================
@@ -55,14 +55,14 @@ use_ddim: false
 # Minimal Test Environment
 #==============================================================================
 env:
-  n_envs: 2
+  n_envs: 30
   name: ${env_name}
   env_type: truck_2d
   best_reward_threshold_for_success: -50.0
-  max_episode_steps: 100
+  max_episode_steps: 200
   save_video: false
   save_meshcat: true
-  approx_n_meshcats_saved: 10
+  approx_n_meshcats_saved: 100
   specific:
     problem_file: "/home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl"
     problem_index_range: [0, 100]
@@ -102,7 +102,7 @@ wandb: null
 # Minimal Training
 #==============================================================================
 train:
-  n_train_itr: 2
+  n_train_itr: 1
   n_critic_warmup_itr: 1
   n_steps: 50
   gamma: 0.999
@@ -111,13 +111,13 @@ train:
   actor_lr: 1e-5
   actor_weight_decay: 0
   actor_lr_scheduler:
-    first_cycle_steps: 2
+    first_cycle_steps: 1
     warmup_steps: 0
     min_lr: 1e-6
   critic_lr: 1e-4
   critic_weight_decay: 0
   critic_lr_scheduler:
-    first_cycle_steps: 2
+    first_cycle_steps: 1
     warmup_steps: 0
     min_lr: 1e-5
   save_model_freq: 10
@@ -128,8 +128,8 @@ train:
   reward_scale_running: true
   reward_scale_const: 1.0
   gae_lambda: 0.95
-  batch_size: 10
-  logprob_batch_size: 10
+  batch_size: 300
+  logprob_batch_size: 300
   update_epochs: 2
   vf_coef: 0.5
   target_kl: 1.0

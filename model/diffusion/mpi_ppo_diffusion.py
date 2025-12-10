@@ -95,28 +95,26 @@ class MPIPolicyActorWrapper(nn.Module):
         
         # Build normalized obs dict for MPI's encoder
         # MPI expects {'images': ..., 'robot_state': ...}
+        # CRITICAL: MPI normalizer transforms images from [0,1] to [-1,1]
+        # The normalizer has scale=2.0, offset=-1.0 for images.
         nobs = {}
         
-        # Handle RGB/images - MPI normalizer uses 'images' key
+        # Handle RGB/images - MUST be normalized to [-1, 1]
         if 'rgb' in cond:
             rgb = cond['rgb'][:, :To]  # [B, To, C, H, W]
             # MPI's obs encoder expects [B*To, C, H, W]
-            nobs['images'] = rgb.reshape(-1, *rgb.shape[2:])
+            rgb_flat = rgb.reshape(-1, *rgb.shape[2:])
+            # Normalize images: [0, 1] -> [-1, 1]
+            normalized = self.normalizer.normalize({'images': rgb_flat})
+            nobs['images'] = normalized['images']
         
         # Handle state - MPI normalizer uses 'robot_state' key
         if 'state' in cond:
             state = cond['state'][:, :To]  # [B, To, D]
             state_flat = state.reshape(-1, state.shape[-1])  # [B*To, D]
             # Normalize state using MPI's normalizer
-            if self.normalizer is not None:
-                try:
-                    normalized = self.normalizer.normalize({'robot_state': state_flat})
-                    nobs['robot_state'] = normalized['robot_state']
-                except (KeyError, AttributeError):
-                    # Fallback if normalizer doesn't have robot_state
-                    nobs['robot_state'] = state_flat
-            else:
-                nobs['robot_state'] = state_flat
+            normalized = self.normalizer.normalize({'robot_state': state_flat})
+            nobs['robot_state'] = normalized['robot_state']
         
         # Encode observations
         nobs_features = self.obs_encoder(nobs)  # [B*To, obs_feature_dim]
@@ -401,6 +399,11 @@ class MPIPPODiffusion(nn.Module):
         self.critic = critic.to(device)
         self.mpi_normalizer = mpi_policy.normalizer
         
+        # Store MPI's noise scheduler for inference (uses exact same sampling as MPI)
+        self.mpi_noise_scheduler = mpi_policy.noise_scheduler
+        self.use_mpi_scheduler = True  # Use MPI scheduler for sampling
+        log.info(f"Using MPI noise scheduler: {type(self.mpi_noise_scheduler).__name__}")
+        
         # Fine-tuning config
         self.ft_denoising_steps = ft_denoising_steps
         self.ft_denoising_steps_d = 0
@@ -425,20 +428,34 @@ class MPIPPODiffusion(nn.Module):
         self.learn_eta = False
         self.eta = None
         
-        # DDPM parameters
+        # DDPM parameters - sync with MPI scheduler if available
         self._setup_ddpm_params(denoising_steps)
         
         log.info(f"MPIPPODiffusion: {denoising_steps} steps, finetuning last {ft_denoising_steps}")
+        log.info(f"  use_mpi_scheduler={self.use_mpi_scheduler}")
     
     def _setup_ddpm_params(self, denoising_steps: int):
-        """Set up DDPM noise schedule parameters (cosine schedule)."""
-        self.betas = cosine_beta_schedule(denoising_steps).to(self.device)
+        """
+        Set up DDPM noise schedule parameters.
         
-        # α_t = 1 - β_t
-        self.alphas = 1.0 - self.betas
-        
-        # α̅_t = ∏_{s=1}^t α_s
-        self.alphas_cumprod = torch.cumprod(self.alphas, axis=0)
+        If MPI scheduler is available, extracts alphas/betas from it to ensure
+        exact consistency between sampling (using scheduler) and training 
+        (using these parameters for log prob computation).
+        """
+        # Try to use MPI scheduler's parameters for consistency
+        if hasattr(self, 'mpi_noise_scheduler') and self.mpi_noise_scheduler is not None:
+            scheduler = self.mpi_noise_scheduler
+            # Extract alphas_cumprod from scheduler
+            self.alphas_cumprod = scheduler.alphas_cumprod.to(self.device)
+            self.alphas = scheduler.alphas.to(self.device)
+            self.betas = scheduler.betas.to(self.device)
+            log.info("Using DDPM parameters from MPI noise scheduler (squaredcos_cap_v2)")
+        else:
+            # Fallback to our cosine schedule
+            self.betas = cosine_beta_schedule(denoising_steps).to(self.device)
+            self.alphas = 1.0 - self.betas
+            self.alphas_cumprod = torch.cumprod(self.alphas, axis=0)
+            log.info("Using custom cosine beta schedule")
         
         # α̅_{t-1}
         self.alphas_cumprod_prev = torch.cat(
@@ -546,6 +563,73 @@ class MPIPPODiffusion(nn.Module):
         
         return mu, logvar, etas
     
+    def _sample_with_mpi_scheduler(
+        self,
+        cond,
+        return_chain=True,
+        use_base_policy=False,
+    ):
+        """
+        Sample actions using MPI's diffusers-based noise scheduler.
+        This produces identical results to MPI's conditional_sample method.
+        
+        Args:
+            cond: Dict with 'state' and 'rgb' keys
+            return_chain: Whether to return denoising chain
+            use_base_policy: Whether to use frozen base policy
+            
+        Returns:
+            Sample namedtuple with:
+                trajectories: Final actions [B, Ta, Da]
+                chains: Denoising chain [B, K+1, Ta, Da] if return_chain else None
+        """
+        device = self.betas.device
+        sample_data = cond["state"] if "state" in cond else cond["rgb"]
+        B = len(sample_data)
+        
+        # Use MPI's scheduler
+        scheduler = self.mpi_noise_scheduler
+        scheduler.set_timesteps(self.denoising_steps)
+        
+        # Select actor
+        actor = self.actor if use_base_policy else self.actor_ft
+        
+        # Encode observations once (for efficiency)
+        global_cond = actor._encode_obs(cond)
+        
+        # Start from pure noise
+        x = torch.randn((B, self.horizon_steps, self.action_dim), device=device)
+        
+        # Collect chain if requested
+        chain = [] if return_chain else None
+        
+        # Add initial noise to chain if finetuning all steps
+        if return_chain and self.ft_denoising_steps == self.denoising_steps:
+            chain.append(x.clone())
+        
+        # DDPM sampling using scheduler.step() - exactly like MPI
+        for t in scheduler.timesteps:
+            t_tensor = t.unsqueeze(0).expand(B).to(device)
+            
+            # Predict noise (epsilon)
+            noise_pred = actor.model(
+                sample=x,
+                timestep=t_tensor,
+                global_cond=global_cond,
+            )
+            
+            # Scheduler step: x_t -> x_{t-1}
+            x = scheduler.step(noise_pred, t, x).prev_sample
+            
+            # Add to chain for finetuning steps
+            if return_chain and t.item() <= self.ft_denoising_steps:
+                chain.append(x.clone())
+        
+        if return_chain:
+            chain = torch.stack(chain, dim=1)
+        
+        return Sample(x, chain)
+    
     @torch.no_grad()
     def forward(
         self,
@@ -557,9 +641,13 @@ class MPIPPODiffusion(nn.Module):
         """
         Sample actions using DDPM.
         
+        If use_mpi_scheduler is True, uses the diffusers-based scheduler
+        for exact compatibility with MPI's sampling. Otherwise uses custom
+        DDPM implementation.
+        
         Args:
             cond: Dict with 'state' and 'rgb' keys
-            deterministic: If True, use zero noise at t=0
+            deterministic: If True, use zero noise at t=0 (only for custom sampling)
             return_chain: Whether to return denoising chain
             use_base_policy: Whether to use frozen base policy
             
@@ -568,6 +656,15 @@ class MPIPPODiffusion(nn.Module):
                 trajectories: Final actions [B, Ta, Da]
                 chains: Denoising chain [B, K+1, Ta, Da] if return_chain else None
         """
+        # Use MPI scheduler for inference if available and enabled
+        if self.use_mpi_scheduler and hasattr(self, 'mpi_noise_scheduler'):
+            return self._sample_with_mpi_scheduler(
+                cond=cond,
+                return_chain=return_chain,
+                use_base_policy=use_base_policy,
+            )
+        
+        # Fallback to custom DDPM implementation
         device = self.betas.device
         sample_data = cond["state"] if "state" in cond else cond["rgb"]
         B = len(sample_data)
