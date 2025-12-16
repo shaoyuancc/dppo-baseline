@@ -11,6 +11,7 @@
 #   poetry run python ../dppo-baseline/script/run.py \
 #       --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d \
 #       --config-name=ft_ppo_mpi_truck_2d_single_box_fresh_critic
+# python script/run.py --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_single_box_fresh_critic
 
 defaults:
   - _self_
@@ -27,8 +28,9 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: truck_2d_dppo_single_box_fresh_critic
+name: truck_2d_dppo_single_box_fresh_critic_warmup10
 logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-fresh/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+# logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
 wandb:
   entity: contact_placement
@@ -69,11 +71,13 @@ env:
   n_envs: 30
   name: ${env_name}
   env_type: truck_2d
-  best_reward_threshold_for_success: -20.0
+  # Success threshold: with step_reward=-0.1 and act_steps=20, worst-case success
+  # (on last step) gives episode_best_reward = -1.9/20 = -0.095. Timeout gives -0.1.
+  best_reward_threshold_for_success: 0.405
   max_episode_steps: 200
   save_video: false
   save_meshcat: true
-  meshcat_save_freq: 10  # Save meshcats every X iterations (like render.freq)
+  meshcat_save_freq: 2  # Save meshcats every X iterations (like render.freq)
   approx_n_meshcats_saved: 5
   specific:
     problem_file: "/home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl"
@@ -91,7 +95,7 @@ env:
     reward_config:
       step_reward: -0.1
       failure_reward: -20.0
-      success_reward: 0.0
+      success_reward: 10.0
   wrappers:
     multi_step:
       n_obs_steps: ${cond_steps}
@@ -115,7 +119,7 @@ shape_meta:
 #==============================================================================
 train:
   n_train_itr: 500
-  n_critic_warmup_itr: 3  # More warmup iterations for fresh critic to learn
+  n_critic_warmup_itr: 10  # More warmup iterations for fresh critic to learn
   n_steps: 300
   gamma: 0.999
   augment: false
