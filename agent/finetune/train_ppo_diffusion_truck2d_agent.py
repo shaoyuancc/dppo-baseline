@@ -210,30 +210,6 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 critic_obs['state'] = state
                 
         return critic_obs
-        
-    def _extract_terminal_info_value(self, value, use_terminal: bool = False):
-        """
-        Extract scalar value from potentially stacked info arrays.
-        
-        When vectorized envs auto-reset, info values can be arrays where:
-        - First element (index 0): from the NEW episode after reset
-        - Last element (index -1): from the TERMINATED episode
-        
-        Args:
-            value: The info value (could be scalar, numpy array, or other)
-            use_terminal: If True and value is array, use LAST element (terminal episode info)
-                         If False, use first element (new episode info)
-        
-        Returns:
-            Scalar value extracted from the array
-        """
-        if isinstance(value, np.ndarray):
-            if value.size == 1:
-                return value.item()
-            elif value.size > 1:
-                # Use last element for terminal info, first for new episode
-                return value[-1] if use_terminal else value[0]
-        return value
     
     def _compute_custom_metrics(self, info_venv, done_venv, step: int = -1):
         """
@@ -249,41 +225,23 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             done_venv: Boolean array indicating which environments finished an episode
             step: Current step within iteration (for debug logging)
         """
+        def get_latest(value, default):
+            """Extract the most recent value from potentially stacked info arrays."""
+            if isinstance(value, np.ndarray):
+                return value.flat[-1]  # Last element, works for any shape
+            return value if value is not None else default
+        
         # Collect all completed episode infos from this step
         for env_idx, info in enumerate(info_venv):
             episode_ended = bool(done_venv[env_idx])
             
-            # When episode ended, vectorized env auto-resets and info contains BOTH
-            # the terminal episode info AND the new episode info (stacked as arrays).
-            # We need to extract the TERMINAL episode info (last element) when done.
-            use_terminal = episode_ended
-            
-            # Extract values - use terminal info when episode ended
-            status = self._extract_terminal_info_value(
-                info.get('status', 'unknown'), use_terminal
-            )
-            if not isinstance(status, str):
-                status = str(status)
-            
-            n_boxes_removed = self._extract_terminal_info_value(
-                info.get('n_boxes_removed', 0), use_terminal
-            )
-            n_boxes_removed = int(n_boxes_removed) if n_boxes_removed is not None else 0
-            
-            n_boxes_total = self._extract_terminal_info_value(
-                info.get('n_boxes_total', 0), use_terminal
-            )
-            n_boxes_total = int(n_boxes_total) if n_boxes_total is not None else 0
-            
-            duration = self._extract_terminal_info_value(
-                info.get('duration', 0), use_terminal
-            )
-            duration = float(duration) if duration is not None else 0.0
-            
-            is_success = self._extract_terminal_info_value(
-                info.get('is_success', False), use_terminal
-            )
-            is_success = bool(is_success)
+            # Extract the most recent values from info
+            # (MultiStep wrapper stacks last n_obs_steps values into arrays)
+            status = str(get_latest(info.get('status'), 'unknown'))
+            n_boxes_removed = int(get_latest(info.get('n_boxes_removed'), 0))
+            n_boxes_total = int(get_latest(info.get('n_boxes_total'), 0))
+            duration = float(get_latest(info.get('duration'), 0.0))
+            is_success = bool(get_latest(info.get('is_success'), False))
             
             # Debug log for every step to trace environment flow
             log.debug(
@@ -503,7 +461,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 
                 # Debug log for environment step results
                 log.debug(
-                    f"Step {step}: rewards={reward_venv}, terminated={terminated_venv}, "
+                    f"Agent Step {step}: rewards={reward_venv}, terminated={terminated_venv}, "
                     f"truncated={truncated_venv}"
                 )
                 
@@ -886,3 +844,4 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 with open(self.result_path, "wb") as f:
                     pickle.dump(run_results, f)
             self.itr += 1
+
