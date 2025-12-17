@@ -192,6 +192,7 @@ class MPIPPODiffusion(nn.Module):
         critic_img_cond_steps: int = 1,
         # Fresh critic option
         use_pretrained_critic: bool = True,
+        critic_type: str = 'mpi',  # 'mpi' for MPI ResNet, 'vit' for DPPO ViTCritic
         critic: dict = None,  # Hydra config for fresh critic
         # PPO params
         gamma_denoising: float = 0.99,
@@ -213,7 +214,7 @@ class MPIPPODiffusion(nn.Module):
         
         This is the intended way to instantiate via hydra config.
         
-        Option 1 - Pretrained critic (default):
+        Option 1 - Pretrained MPI critic (default):
         
             model:
               _target_: model.diffusion.mpi_ppo_diffusion.MPIPPODiffusion.from_mpi_checkpoints
@@ -224,26 +225,43 @@ class MPIPPODiffusion(nn.Module):
               use_pretrained_critic: true  # default
               ...
               
-        Option 2 - Fresh critic (trained from scratch during PPO):
+        Option 2 - Fresh MPI critic (ResNet, trained from scratch):
         
             model:
               _target_: model.diffusion.mpi_ppo_diffusion.MPIPPODiffusion.from_mpi_checkpoints
-              policy_checkpoint_path: /path/to/policy.ckpt
-              policy_normalizer_path: /path/to/normalizer.pt
               use_pretrained_critic: false
+              critic_type: mpi  # default
               critic:
                 _target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork
                 img_shape: [1, 71, 192]
                 state_dim: 6
                 features_dim: 512
               ...
+              
+        Option 3 - Fresh DPPO ViTCritic (trained from scratch):
+        
+            model:
+              _target_: model.diffusion.mpi_ppo_diffusion.MPIPPODiffusion.from_mpi_checkpoints
+              use_pretrained_critic: false
+              critic_type: vit
+              critic:
+                _target_: model.common.critic.ViTCritic
+                backbone:
+                  _target_: model.common.vit.VitEncoder
+                  ...
+              ...
         
         Args:
             use_pretrained_critic: If True, load critic from checkpoint. If False, 
                 instantiate fresh critic from `critic` config.
+            critic_type: Type of fresh critic - 'mpi' for MPI ResNet, 'vit' for DPPO ViTCritic.
+                Only used when use_pretrained_critic=False.
             critic: Hydra config dict for fresh critic (used when use_pretrained_critic=False)
+            critic_n_obs_steps: Number of state observation steps for critic (used by AGENT,
+                not by the wrappers - wrappers receive pre-extracted observations)
+            critic_img_cond_steps: Number of image frames for critic (used by AGENT)
         """
-        from model.common.mpi_critic_wrapper import MPICriticWrapper, MPICriticWrapperFresh
+        from model.common.mpi_critic_wrapper import MPICriticWrapper, MPICriticWrapperFresh, DPPOViTCriticWrapper
         
         log.info("=" * 60)
         log.info("Loading MPI models for DPPO training")
@@ -279,45 +297,52 @@ class MPIPPODiffusion(nn.Module):
                 img_cond_steps=critic_img_cond_steps,
             )
         else:
-            # Option 2: Create fresh critic from config
+            # Option 2/3: Create fresh critic from config
             if critic is None:
                 raise ValueError(
                     "use_pretrained_critic=False requires `critic` config to be specified. "
                     "Example: critic._target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork"
                 )
-            log.info("Creating fresh critic from config (will be trained from scratch)")
+            
+            log.info(f"Creating fresh {critic_type.upper()} critic from config (will be trained from scratch)")
             
             # Handle both cases: critic may be a config dict OR already instantiated by Hydra
             if isinstance(critic, nn.Module):
                 # Hydra already instantiated the critic (due to recursive instantiation)
                 log.info(f"  Critic already instantiated: {type(critic).__name__}")
-                fresh_value_network = critic
+                fresh_critic = critic
             else:
                 # Critic is a config dict, instantiate it
                 log.info(f"  Critic config: {critic}")
-                fresh_value_network = hydra.utils.instantiate(critic)
+                fresh_critic = hydra.utils.instantiate(critic)
             
-            fresh_value_network = fresh_value_network.to(device)
+            fresh_critic = fresh_critic.to(device)
             
-            # Set the policy normalizer on the fresh critic for observation normalization
-            # This ensures the critic sees the same normalized observations as the policy
-            if hasattr(fresh_value_network, 'set_normalizer'):
-                # Load policy normalizer and set it on the fresh critic
-                policy_normalizer = torch.load(
-                    policy_normalizer_path, map_location=device, weights_only=False
-                )
-                fresh_value_network.set_normalizer(policy_normalizer)
-                log.info("Set policy normalizer on fresh critic for observation normalization")
+            if critic_type == 'vit':
+                # DPPO ViTCritic - wrap with image range conversion
+                log.info("Using DPPO ViTCritic with DPPOViTCriticWrapper")
+                wrapped_critic = DPPOViTCriticWrapper(fresh_critic)
+                
+            elif critic_type == 'mpi':
+                # MPI ResNet critic - set normalizer and wrap
+                log.info("Using MPI ResNet critic with MPICriticWrapperFresh")
+                
+                # Set the policy normalizer on the fresh MPI critic for observation normalization
+                if hasattr(fresh_critic, 'set_normalizer'):
+                    policy_normalizer = torch.load(
+                        policy_normalizer_path, map_location=device, weights_only=False
+                    )
+                    fresh_critic.set_normalizer(policy_normalizer)
+                    log.info("Set policy normalizer on fresh MPI critic for observation normalization")
+                
+                # Wrap fresh critic for DPPO interface
+                wrapped_critic = MPICriticWrapperFresh(fresh_critic)
+                
+            else:
+                raise ValueError(f"Unknown critic_type: {critic_type}. Must be 'mpi' or 'vit'.")
             
-            # Wrap fresh critic for DPPO interface
-            wrapped_critic = MPICriticWrapperFresh(
-                mpi_value_network=fresh_value_network,
-                n_obs_steps=critic_n_obs_steps,
-                img_cond_steps=critic_img_cond_steps,
-            )
-            
-            n_critic_params = sum(p.numel() for p in fresh_value_network.parameters())
-            n_trainable = sum(p.numel() for p in fresh_value_network.parameters() if p.requires_grad)
+            n_critic_params = sum(p.numel() for p in fresh_critic.parameters())
+            n_trainable = sum(p.numel() for p in fresh_critic.parameters() if p.requires_grad)
             log.info(f"Fresh critic: {n_critic_params} total params, {n_trainable} trainable")
         
         # Create and return instance

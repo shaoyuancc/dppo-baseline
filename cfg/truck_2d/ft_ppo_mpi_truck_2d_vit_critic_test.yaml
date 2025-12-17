@@ -1,17 +1,21 @@
-# MPI-DPPO with FRESH CRITIC (trained from scratch)
+# MINIMAL TEST CONFIG for ViTCritic integration testing
 #
-# This config trains the critic from scratch during PPO fine-tuning instead of
-# loading a pretrained value network checkpoint. This is useful when:
-# - You want the critic to adapt to the policy's changing distribution
-# - You don't have a pretrained value network
-# - You want to compare fresh vs pretrained critic performance
+# This config runs a single training iteration with minimal resources to verify
+# that all code is working correctly before running larger experiments.
+#
+# Settings:
+# - 1 training iteration (no eval)
+# - 5 environments
+# - 10 steps per iteration
+# - No wandb logging
+# - No meshcat saving
 #
 # Usage:
 #   cd /home/shaoyuan/Documents/Software/motion-policy-improvement
 #   poetry run python ../dppo-baseline/script/run.py \
 #       --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d \
-#       --config-name=ft_ppo_mpi_truck_2d_fresh_critic
-# python script/run.py --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_fresh_critic
+#       --config-name=ft_ppo_mpi_truck_2d_vit_critic_test
+# python script/run.py --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_vit_critic_test
 
 defaults:
   - _self_
@@ -25,20 +29,24 @@ hydra:
         level: ERROR
       agent.finetune.train_ppo_diffusion_truck2d_agent:
         level: DEBUG
-      dppo_baseline.env.truck_2d_env:
+      model.diffusion.mpi_ppo_diffusion:
+        level: DEBUG
+      model.common.mpi_critic_wrapper:
         level: DEBUG
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: test # truck_2d_mpi_fresh_critic
-logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-fresh/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+name: vit_critic_integration_test
+logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-test/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+
+# Disable wandb for test
+wandb: null
 
 #==============================================================================
-# MPI Checkpoint Paths (only policy needed - critic will be trained fresh)
+# MPI Checkpoint Paths
 #==============================================================================
-base_policy_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/checkpoints/latest.ckpt
-policy_normalizer_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/normalizer.pt
-# NOTE: critic_path and critic_normalizer_path are NOT needed when use_pretrained_critic=false
+base_policy_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-08-07/20-39-40_train_truck_2d_diffusion_policy_5K_full_truck_point_contact_03-51-35_local/checkpoints/step_035000-val_loss_0.0091-val_ddim_mse_0.1280.ckpt
+policy_normalizer_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-08-07/20-39-40_train_truck_2d_diffusion_policy_5K_full_truck_point_contact_03-51-35_local/normalizer.pt
 
 #==============================================================================
 # Core Configuration
@@ -59,21 +67,21 @@ act_steps: 20
 use_ddim: false
 
 #==============================================================================
-# Environment Configuration
+# Environment Configuration - MINIMAL for testing
 #==============================================================================
 env:
-  n_envs: 1
+  n_envs: 5  # Minimal environments
   name: ${env_name}
   env_type: truck_2d
   best_reward_threshold_for_success: 0.405
   max_episode_steps: 200
   save_video: false
-  save_meshcat: true
-  meshcat_save_freq: 1  # Save meshcats every X iterations (like render.freq)
-  approx_n_meshcats_saved: 100
+  save_meshcat: false  # Disable for test
+  meshcat_save_freq: 100
+  approx_n_meshcats_saved: 0
   specific:
     problem_file: "/home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl"
-    problem_index_range: [0, 100]
+    problem_index_range: [0, 100]  # Use small subset
     control_timestep: 0.1
     physics_timestep: 0.002
     init_x: 1.0
@@ -104,67 +112,77 @@ shape_meta:
   action:
     shape: [5]
 
-wandb: null
-
 #==============================================================================
-# Training Configuration
-# NOTE: n_critic_warmup_itr is important for fresh critic - keeps actor frozen
-#       while the randomly-initialized critic learns initial value estimates
+# Training Configuration - MINIMAL for testing
 #==============================================================================
 train:
-  n_train_itr: 100
-  n_critic_warmup_itr: 5  # More warmup iterations for fresh critic to learn
-  n_steps: 20
+  n_train_itr: 3  # Single iteration
+  n_critic_warmup_itr: 0  # No warmup for quick test
+  n_steps: 10  # Minimal steps
   gamma: 0.999
   augment: false
-  grad_accumulate: 1
+  grad_accumulate: 1  # No accumulation for test
   actor_lr: 1e-5
   actor_weight_decay: 0
   actor_lr_scheduler:
-    first_cycle_steps: 100
-    warmup_steps: 5
-    min_lr: 1e-6
-  critic_lr: 1e-3  # Higher LR for fresh critic to learn faster
+    first_cycle_steps: 1
+    warmup_steps: 0
+    min_lr: 1e-5
+  critic_lr: 1e-3
   critic_weight_decay: 0
   critic_lr_scheduler:
-    first_cycle_steps: 100
-    warmup_steps: 5
-    min_lr: 1e-4
-  save_model_freq: 10
-  val_freq: 10
+    first_cycle_steps: 1
+    warmup_steps: 0
+    min_lr: 1e-3
+  save_model_freq: 100  # Don't save during test
+  val_freq: 100  # No eval during test
   render:
-    freq: 10
+    freq: 100
     num: 0
   reward_scale_running: true
   reward_scale_const: 1.0
   gae_lambda: 0.95
-  batch_size: 500
-  logprob_batch_size: 240
-  update_epochs: 4  # More epochs per iteration for fresh critic
+  batch_size: 50  # Small batch
+  logprob_batch_size: 50
+  update_epochs: 1  # Single epoch
   vf_coef: 0.5
   target_kl: 1.0
 
 #==============================================================================
-# Model - MPI PPO Diffusion with FRESH CRITIC
+# Model - MPI PPO Diffusion with DPPO ViTCritic
 #==============================================================================
 model:
   _target_: model.diffusion.mpi_ppo_diffusion.MPIPPODiffusion.from_mpi_checkpoints
   
-  # Policy checkpoint (required)
   policy_checkpoint_path: ${base_policy_path}
   policy_normalizer_path: ${policy_normalizer_path}
   
-  # Fresh critic configuration
-  use_pretrained_critic: false  # <-- KEY: Set to false for fresh critic
+  # Fresh ViTCritic configuration
+  use_pretrained_critic: false
+  critic_type: vit
   critic:
-    # This instantiates a fresh ResNet18-based value network
-    _target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork
-    img_shape: [1, 71, 192]
-    state_dim: 6
-    features_dim: 512
-    use_tanh: false  # <-- IMPORTANT: Disable Tanh for PPO (need unbounded values)
+    _target_: model.common.critic.ViTCritic
+    backbone:
+      _target_: model.common.vit.VitEncoder
+      obs_shape: ${shape_meta.obs.rgb.shape}
+      num_channel: ${critic_img_cond_steps}
+      img_h: 71
+      img_w: 192
+      cfg:
+        patch_size: 8
+        depth: 1
+        embed_dim: 128
+        num_heads: 4
+        embed_style: embed2
+        embed_norm: 0
+    img_cond_steps: ${critic_img_cond_steps}
+    spatial_emb: 128
+    mlp_dims: [256, 256, 256]
+    activation_type: Mish
+    residual_style: true
+    cond_dim: ${eval:'${obs_dim} * ${critic_n_obs_steps}'}
+    augment: false
   
-  # Model architecture params
   ft_denoising_steps: ${ft_denoising_steps}
   denoising_steps: ${denoising_steps}
   horizon_steps: ${horizon_steps}
@@ -174,7 +192,6 @@ model:
   critic_n_obs_steps: ${critic_n_obs_steps}
   critic_img_cond_steps: ${critic_img_cond_steps}
   
-  # PPO params
   gamma_denoising: 0.99
   clip_ploss_coef: 0.01
   clip_ploss_coef_base: 0.001

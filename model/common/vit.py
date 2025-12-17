@@ -86,10 +86,12 @@ class PatchEmbed2(nn.Module):
         ]
         self.embed = nn.Sequential(*layers)
 
-        H1 = math.ceil((img_h - 8) / 4) + 1
-        W1 = math.ceil((img_w - 8) / 4) + 1
-        H2 = math.ceil((H1 - 3) / 2) + 1
-        W2 = math.ceil((W1 - 3) / 2) + 1
+        # Use floor to match Conv2d output size calculation:
+        # output_size = floor((input_size - kernel_size) / stride) + 1
+        H1 = math.floor((img_h - 8) / 4) + 1
+        W1 = math.floor((img_w - 8) / 4) + 1
+        H2 = math.floor((H1 - 3) / 2) + 1
+        W2 = math.floor((W1 - 3) / 2) + 1
         self.num_patch = H2 * W2
         self.patch_dim = embed_dim
 

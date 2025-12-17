@@ -755,6 +755,19 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 explained_var = (
                     np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
                 )
+                
+                # Diagnostic logging for value function debugging
+                returns_mean = float(np.mean(y_true))
+                returns_std = float(np.std(y_true))
+                values_mean = float(np.mean(y_pred))
+                values_std = float(np.std(y_pred))
+                advantages_mean = float(advantages_k.mean().cpu().numpy())
+                advantages_std = float(advantages_k.std().cpu().numpy())
+                log.info(
+                    f"[Critic Diagnostics] Returns: mean={returns_mean:.4f}, std={returns_std:.4f} | "
+                    f"Values: mean={values_mean:.4f}, std={values_std:.4f} | "
+                    f"Advantages: mean={advantages_mean:.4f}, std={advantages_std:.4f}"
+                )
 
             # Update lr
             if self.itr >= self.n_critic_warmup_itr:
@@ -836,6 +849,13 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                                 "avg_task_completion - train": custom_metrics['avg_task_completion'],
                                 "custom_success_rate - train": custom_metrics['custom_success_rate'],
                                 "n_episodes_completed - train": custom_metrics['n_episodes_completed'],
+                                # Critic diagnostic metrics (for debugging value collapse)
+                                "critic/returns_mean": returns_mean,
+                                "critic/returns_std": returns_std,
+                                "critic/values_mean": values_mean,
+                                "critic/values_std": values_std,
+                                "critic/advantages_mean": advantages_mean,
+                                "critic/advantages_std": advantages_std,
                             },
                             step=self.itr,
                             commit=True,
