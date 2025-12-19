@@ -160,6 +160,90 @@ def make_async(
             else SyncVectorEnv(env_fns)
         )
 
+    # Support for truck_2d_reach environment (simplified reach task)
+    if env_type == "truck_2d_reach":
+        from gym import spaces
+        from env.gym_utils.async_vector_env import AsyncVectorEnv
+        from env.gym_utils.sync_vector_env import SyncVectorEnv
+        from env.gym_utils.wrapper import wrapper_dict
+        
+        # Import reach environment from mpi's dppo_baseline package
+        from dppo_baseline.env.truck_2d_reach_env import TruckUnload2DReachEnv
+        
+        # Extract env-specific kwargs from **kwargs
+        env_kwargs = {
+            k: v for k, v in kwargs.items() 
+            if k in [
+                'problem_file', 'problem_index_range',
+                'control_timestep', 'physics_timestep', 'render_mode',
+                'max_suction_distance', 'max_suction_angle',
+                'max_penetration_distance', 'enable_tracking_failure',
+                'enable_penetration_failure', 'init_x',
+                'reward_config',  # Reward configuration dict
+                'max_boxes',  # Limit number of boxes per problem
+                'normalize_actions',  # Whether env expects normalized actions
+                'full_trajectory_mode',  # Use full trajectory execution
+                'act_steps',  # Number of steps to execute in full trajectory mode
+                # Note: reach task params (touch_threshold, max_reward_distance, dense_reward_scale)
+                # are now under reward_config
+            ]
+        }
+        if max_episode_steps is not None:
+            env_kwargs['max_episode_steps'] = max_episode_steps
+        if act_steps is not None:
+            env_kwargs['act_steps'] = act_steps
+        
+        def _make_env():
+            env = TruckUnload2DReachEnv(**env_kwargs)
+            # Add wrappers
+            if wrappers is not None:
+                for wrapper, args in wrappers.items():
+                    env = wrapper_dict[wrapper](env, **args)
+            return env
+        
+        def dummy_env_fn():
+            """Create dummy env for space introspection."""
+            import gym
+            import numpy as np
+            from env.gym_utils.wrapper.multi_step import MultiStep
+            
+            env = gym.Env()
+            observation_space = spaces.Dict()
+            if shape_meta is not None:
+                for key, value in shape_meta["obs"].items():
+                    shape = tuple(value["shape"])
+                    if key.endswith("rgb"):
+                        min_value, max_value = 0, 1
+                    elif key.endswith("state"):
+                        min_value, max_value = -np.inf, np.inf
+                    else:
+                        min_value, max_value = -1, 1
+                    observation_space[key] = spaces.Box(
+                        low=min_value,
+                        high=max_value,
+                        shape=shape,
+                        dtype=np.float32,
+                    )
+            env.observation_space = observation_space
+            env.action_space = spaces.Box(-1, 1, shape=(action_dim,), dtype=np.float32)
+            env.metadata = {
+                "render.modes": ["human", "rgb_array"],
+                "video.frames_per_second": 10,
+            }
+            n_obs_steps = wrappers.multi_step.n_obs_steps if hasattr(wrappers, 'multi_step') else 1
+            return MultiStep(env=env, n_obs_steps=n_obs_steps)
+        
+        env_fns = [_make_env for _ in range(num_envs)]
+        return (
+            AsyncVectorEnv(
+                env_fns,
+                dummy_env_fn=dummy_env_fn,
+                copy=False,
+            )
+            if asynchronous
+            else SyncVectorEnv(env_fns)
+        )
+
     if env_type == "furniture":
         from furniture_bench.envs.observation import DEFAULT_STATE_OBS
         from furniture_bench.envs.furniture_rl_sim_env import FurnitureRLSimEnv

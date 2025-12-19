@@ -222,9 +222,11 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         Extract custom metrics from episode infos.
         
         Calculates:
-        - avg_pieces_per_hour: Average PPH across completed episodes
-        - avg_task_completion: Average task completion ratio
-        - custom_success_rate: Success rate based on whether all boxes were removed
+        - avg_pieces_per_hour: Average PPH across completed episodes (truck task only)
+        - avg_task_completion: Average task completion ratio (truck task only)
+        - custom_success_rate: Success rate based on is_success flag
+        
+        For reach task (no n_boxes_total), PPH and task_completion are skipped.
         
         Args:
             info_venv: List of info dicts from each environment
@@ -244,17 +246,31 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             # Extract the most recent values from info
             # (MultiStep wrapper stacks last n_obs_steps values into arrays)
             status = str(get_latest(info.get('status'), 'unknown'))
-            n_boxes_removed = int(get_latest(info.get('n_boxes_removed'), 0))
-            n_boxes_total = int(get_latest(info.get('n_boxes_total'), 0))
             duration = float(get_latest(info.get('duration'), 0.0))
             is_success = bool(get_latest(info.get('is_success'), False))
             
+            # Truck-specific fields (may not exist for reach task)
+            n_boxes_removed = int(get_latest(info.get('n_boxes_removed'), 0))
+            n_boxes_total = int(get_latest(info.get('n_boxes_total'), 0))
+            
+            # Check if this is a truck unloading task (has box metrics)
+            has_truck_metrics = n_boxes_total > 0
+            
             # Debug log for every step to trace environment flow
-            log.debug(
-                f"[Env {env_idx}] Step {step}: status={status}, "
-                f"n_boxes_removed={n_boxes_removed}/{n_boxes_total}, "
-                f"duration={duration:.2f}s"
-            )
+            if has_truck_metrics:
+                log.debug(
+                    f"[Env {env_idx}] Step {step}: status={status}, "
+                    f"n_boxes_removed={n_boxes_removed}/{n_boxes_total}, "
+                    f"duration={duration:.2f}s"
+                )
+            else:
+                # Reach task - log distance if available
+                distance = get_latest(info.get('distance_to_box'), None)
+                dist_str = f", distance={distance:.4f}m" if distance is not None else ""
+                log.debug(
+                    f"[Env {env_idx}] Step {step}: status={status}, "
+                    f"duration={duration:.2f}s{dist_str}"
+                )
             
             # Only record episode info when the episode actually ended
             if episode_ended:
@@ -262,25 +278,38 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 
                 ep_info = {
                     'env_idx': env_idx,
-                    'n_boxes_total': n_boxes_total,
-                    'n_boxes_removed': n_boxes_removed,
                     'duration': duration,
                     'is_success': is_success,
                     'status': status,
                     'step': step,
                 }
+                
+                # Only include truck-specific fields if they exist
+                if has_truck_metrics:
+                    ep_info['n_boxes_total'] = n_boxes_total
+                    ep_info['n_boxes_removed'] = n_boxes_removed
+                
                 self._episode_infos.append(ep_info)
                 
                 # Log episode result at INFO level
-                log.info(
-                    f"[Env {env_idx}] Episode ended at step {step}: "
-                    f"status={status}, boxes_removed={n_boxes_removed}/{n_boxes_total}, "
-                    f"duration={duration:.2f}s, success={is_success}"
-                )
+                if has_truck_metrics:
+                    log.info(
+                        f"[Env {env_idx}] Episode ended at step {step}: "
+                        f"status={status}, boxes_removed={n_boxes_removed}/{n_boxes_total}, "
+                        f"duration={duration:.2f}s, success={is_success}"
+                    )
+                else:
+                    log.info(
+                        f"[Env {env_idx}] Episode ended at step {step}: "
+                        f"status={status}, duration={duration:.2f}s, success={is_success}"
+                    )
         
     def _aggregate_custom_metrics(self, timeout_duration: float = 100.0):
         """
         Aggregate custom metrics from all completed episodes in this iteration.
+        
+        For truck unloading task: computes PPH, task_completion, success_rate
+        For reach task (no n_boxes_total): only computes success_rate
         """
         log.debug(f"Aggregating metrics from {len(self._episode_infos)} episodes")
         
@@ -300,28 +329,35 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         n_success = 0
         
         for ep_info in self._episode_infos:
-            n_total = ep_info.get('n_boxes_total', 1)
-            n_removed = ep_info.get('n_boxes_removed', 0)
             is_success = ep_info.get('is_success', False)
             status = ep_info.get('status', 'unknown')
             
             # Count statuses
             status_counts[status] = status_counts.get(status, 0) + 1
             
-            # Task completion
-            if n_total > 0:
-                tc_values.append(n_removed / n_total)
-            
-            # PPH calculation
+            # Count successes (works for any task type)
             if is_success:
-                duration = max(0.001, ep_info.get('duration', 0))
                 n_success += 1
-            else:
-                duration = timeout_duration
             
-            if duration > 0 and n_removed >= 0:
-                pph = (n_removed / duration) * 3600  # pieces per hour
-                pph_values.append(pph)
+            # Only compute PPH and task_completion for truck unloading task
+            # (reach task doesn't have n_boxes_total in ep_info)
+            if 'n_boxes_total' in ep_info:
+                n_total = ep_info['n_boxes_total']
+                n_removed = ep_info.get('n_boxes_removed', 0)
+                
+                # Task completion
+                if n_total > 0:
+                    tc_values.append(n_removed / n_total)
+                
+                # PPH calculation
+                if is_success:
+                    duration = max(0.001, ep_info.get('duration', 0))
+                else:
+                    duration = timeout_duration
+                
+                if duration > 0 and n_removed >= 0:
+                    pph = (n_removed / duration) * 3600  # pieces per hour
+                    pph_values.append(pph)
         
         metrics = {
             'avg_pieces_per_hour': float(np.mean(pph_values)) if pph_values else 0.0,

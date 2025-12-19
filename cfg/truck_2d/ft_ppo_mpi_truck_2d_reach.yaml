@@ -1,0 +1,224 @@
+# REACH TASK CONFIG - Simplified validation task
+#
+# A simple "reach and touch" task where the robot must touch any box.
+# Uses dense distance-based rewards with step penalty to encourage fast completion.
+#
+# Reward design:
+#   - Step penalty: -0.1 (time cost, always negative)
+#   - Dense bonus: 0.02 * max(0, 1 - distance/max_distance)
+#   - Success: +10.0 when touching box (distance <= touch_threshold)
+#   - Failure: -10.0 for penetration/tracking failures
+#
+# Usage:
+#   cd /home/shaoyuan/Documents/Software/motion-policy-improvement
+#   poetry run python ../dppo-baseline/script/run.py \
+#       --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d \
+#       --config-name=ft_ppo_mpi_truck_2d_reach
+
+# python script/run.py --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_reach
+# python script/run.py --config-path=/teamspace/studios/this_studio/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_reach
+
+defaults:
+  - _self_
+
+hydra:
+  run:
+    dir: ${logdir}
+  job_logging:
+    loggers:
+      matplotlib.axes._base:
+        level: ERROR
+      agent.finetune.train_ppo_diffusion_truck2d_agent:
+        level: INFO
+      dppo_baseline.env.truck_2d_reach_env:
+        level: INFO
+      model.diffusion.mpi_ppo_diffusion:
+        level: INFO
+      model.common.mpi_critic_wrapper:
+        level: INFO
+
+_target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
+
+name: reach_task
+logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-reach/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+
+wandb: null
+wandb:
+  entity: contact_placement
+  project: truck_2d-reach-dppo
+  run: ${now:%Y-%m-%d}_${now:%H-%M-%S}_${name}
+
+#==============================================================================
+# MPI Checkpoint Paths
+#==============================================================================
+base_policy_path: /teamspace/lightning_storage/cloud-experiments/2025-10-28/05-02-10_base_policy_val_networks_5K_4box_multiout16_policy_only_200Ksteps/iterations/0/policy_training/checkpoints/step_160000-val_loss_0.0072-val_ddim_mse_0.3591.ckpt
+policy_normalizer_path: /teamspace/lightning_storage/cloud-experiments/2025-10-28/05-02-10_base_policy_val_networks_5K_4box_multiout16_policy_only_200Ksteps/iterations/0/policy_training/normalizer.pt
+
+#==============================================================================
+# Core Configuration
+#==============================================================================
+seed: 42
+device: cuda:0
+env_name: truck_2d_reach
+obs_dim: 6
+action_dim: 5
+denoising_steps: 100
+ft_denoising_steps: 10
+cond_steps: 2
+img_cond_steps: 2
+critic_img_cond_steps: 2
+critic_n_obs_steps: 2
+horizon_steps: 32
+act_steps: 20
+use_ddim: false
+
+#==============================================================================
+# Environment Configuration - REACH TASK
+#==============================================================================
+env:
+  n_envs: 50
+  name: ${env_name}
+  env_type: truck_2d_reach
+  best_reward_threshold_for_success: 5.0  # Lower threshold for reach task
+  max_episode_steps: 50
+  save_video: false
+  save_meshcat: true
+  meshcat_save_freq: 1
+  approx_n_meshcats_saved: 5
+  reinit_freq: 1  # Reinitialize environments every N iterations to reclaim leaked memory
+  specific:    
+    # Base environment parameters
+    problem_file: "/home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl"
+    problem_index_range: [0, 145000]
+    control_timestep: 0.1
+    physics_timestep: 0.002
+    init_x: 1.0
+    max_boxes: 1  # Single box for simplicity
+    enable_tracking_failure: false
+    enable_penetration_failure: true
+    max_penetration_distance: 0.1
+    full_trajectory_mode: false
+    act_steps: ${act_steps}
+    normalize_actions: false 
+    
+    # Reward configuration for reach task
+    reward_config:
+      step_reward: -0.1        # Time penalty (always negative)
+      failure_reward: -10.0    # Penetration/tracking failure
+      success_reward: 10.0     # Touching the box
+      # Reach task specific parameters
+      touch_threshold: 0.02       # 2cm - success when closer than this
+      max_reward_distance: 2.0    # distance beyond which dense bonus is zero
+      dense_reward_scale: 0.05    # Small shaping bonus
+      
+  wrappers:
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: true
+
+shape_meta:
+  obs:
+    rgb:
+      shape: [1, 71, 192]
+    state:
+      shape: [6]
+  action:
+    shape: [5]
+
+#==============================================================================
+# Training Configuration
+#==============================================================================
+train:
+  n_train_itr: 301
+  n_critic_warmup_itr: 2
+  n_steps: 180
+  gamma: 0.999
+  augment: false
+  grad_accumulate: 20
+  actor_lr: 1e-5
+  actor_weight_decay: 0
+  actor_lr_scheduler:
+    first_cycle_steps: ${train.n_train_itr}
+    warmup_steps: 10
+    min_lr: 1e-5
+  critic_lr: 1e-3
+  critic_weight_decay: 0
+  critic_lr_scheduler:
+    first_cycle_steps: ${train.n_train_itr}
+    warmup_steps: 10
+    min_lr: 1e-3
+  save_model_freq: 100
+  val_freq: 10
+  render:
+    freq: 100
+    num: 0
+  reward_scale_running: true
+  reward_scale_const: 1.0
+  gae_lambda: 0.95
+  batch_size: 500
+  logprob_batch_size: 1000
+  update_epochs: 10
+  vf_coef: 0.5
+  target_kl: 1.0
+
+#==============================================================================
+# Model - MPI PPO Diffusion with DPPO ViTCritic
+#==============================================================================
+model:
+  _target_: model.diffusion.mpi_ppo_diffusion.MPIPPODiffusion.from_mpi_checkpoints
+  
+  # Policy checkpoint (required)
+  policy_checkpoint_path: ${base_policy_path}
+  policy_normalizer_path: ${policy_normalizer_path}
+  
+  # Fresh ViTCritic configuration
+  use_pretrained_critic: false
+  critic_type: vit  # <-- Use DPPO's ViTCritic
+  critic:
+    _target_: model.common.critic.ViTCritic
+    backbone:
+      _target_: model.common.vit.VitEncoder
+      obs_shape: ${shape_meta.obs.rgb.shape}
+      # num_channel = C * img_cond_steps (grayscale * history frames)
+      num_channel: ${critic_img_cond_steps}
+      img_h: 71
+      img_w: 192
+      cfg:
+        patch_size: 8
+        depth: 1
+        embed_dim: 128
+        num_heads: 4
+        embed_style: embed2
+        embed_norm: 0
+    img_cond_steps: ${critic_img_cond_steps}
+    spatial_emb: 128
+    mlp_dims: [256, 256, 256]
+    activation_type: Mish
+    residual_style: true
+    # cond_dim = state_dim * critic_n_obs_steps
+    cond_dim: ${eval:'${obs_dim} * ${critic_n_obs_steps}'}
+    augment: false  # REQUIRED: Non-square images break RandomShiftsAug
+  
+  # Model architecture params
+  ft_denoising_steps: ${ft_denoising_steps}
+  denoising_steps: ${denoising_steps}
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  device: ${device}
+  critic_n_obs_steps: ${critic_n_obs_steps}
+  critic_img_cond_steps: ${critic_img_cond_steps}
+  
+  # PPO params
+  gamma_denoising: 0.99
+  clip_ploss_coef: 0.01
+  clip_ploss_coef_base: 0.001
+  clip_ploss_coef_rate: 3
+  norm_adv: true
+  min_sampling_denoising_std: 0.1
+  min_logprob_denoising_std: 0.1
+  denoised_clip_value: 1.0
+  randn_clip_value: 3
+
