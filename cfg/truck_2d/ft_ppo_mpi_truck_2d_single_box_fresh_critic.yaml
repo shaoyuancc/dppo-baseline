@@ -29,20 +29,22 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: truck_2d_dppo_single_box_fresh_critic_dagbsckpt_womeshcat
+name: multiout_160K_ckpt_actor_lr_1e-5
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-fresh/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
 wandb:
   entity: contact_placement
   project: truck_2d-dppo
-  run: ${now:%H-%M-%S}_${name}
+  run: ${now:%Y-%m-%d}_${now:%H-%M-%S}_${name}
 
 #==============================================================================
 # MPI Checkpoint Paths (only policy needed - critic will be trained fresh)
 #==============================================================================
-base_policy_path: /teamspace/lightning_storage/cloud-experiments/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/checkpoints/latest.ckpt
-policy_normalizer_path: /teamspace/lightning_storage/cloud-experiments/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/normalizer.pt
+base_policy_path: /teamspace/lightning_storage/cloud-experiments/2025-10-28/05-02-10_base_policy_val_networks_5K_4box_multiout16_policy_only_200Ksteps/iterations/0/policy_training/checkpoints/step_160000-val_loss_0.0072-val_ddim_mse_0.3591.ckpt
+policy_normalizer_path: /teamspace/lightning_storage/cloud-experiments/2025-10-28/05-02-10_base_policy_val_networks_5K_4box_multiout16_policy_only_200Ksteps/iterations/0/policy_training/normalizer.pt
+# base_policy_path: /teamspace/lightning_storage/cloud-experiments/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/checkpoints/latest.ckpt
+# policy_normalizer_path: /teamspace/lightning_storage/cloud-experiments/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/normalizer.pt
 # base_policy_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/checkpoints/latest.ckpt
 # policy_normalizer_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/normalizer.pt
 # NOTE: critic_path and critic_normalizer_path are NOT needed when use_pretrained_critic=false
@@ -80,6 +82,7 @@ env:
   save_meshcat: false
   meshcat_save_freq: 2  # Save meshcats every X iterations (like render.freq)
   approx_n_meshcats_saved: 5
+  reinit_freq: 1  # Reinitialize environments every N iterations to reclaim leaked memory (0 to disable)
   specific:
     problem_file: /teamspace/studios/this_studio/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl
     # problem_file: /home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl
@@ -120,18 +123,18 @@ shape_meta:
 #       while the randomly-initialized critic learns initial value estimates
 #==============================================================================
 train:
-  n_train_itr: 500
+  n_train_itr: 200
   n_critic_warmup_itr: 3  # More warmup iterations for fresh critic to learn
   n_steps: 300
   gamma: 0.999
   augment: false
   grad_accumulate: 20
-  actor_lr: 2e-5
+  actor_lr: 1e-5
   actor_weight_decay: 0
   actor_lr_scheduler:
     first_cycle_steps: ${train.n_train_itr}
     warmup_steps: 5
-    min_lr: 2e-5
+    min_lr: 1e-5
   critic_lr: 1e-3  # Higher LR for fresh critic to learn faster
   critic_weight_decay: 0
   critic_lr_scheduler:
