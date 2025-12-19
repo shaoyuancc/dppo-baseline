@@ -65,6 +65,12 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         self.critic_img_cond_steps = cfg.get('critic_img_cond_steps', self.n_cond_step)
         log.info(f"Critic uses {self.critic_n_obs_steps} obs steps, {self.critic_img_cond_steps} img cond steps")
         
+        # Environment reinitialization frequency (to reclaim leaked Drake memory)
+        # Set to 0 to disable, 1 to reinit every iteration, N to reinit every N iterations
+        self.env_reinit_freq = cfg.env.get('reinit_freq', 0)
+        if self.env_reinit_freq > 0:
+            log.info(f"Environment reinitialization enabled: every {self.env_reinit_freq} iteration(s)")
+        
         # Validate that policy normalizer is loaded for action unnormalization
         if self.policy_normalizer is None:
             log.warning(
@@ -356,6 +362,10 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         done_venv = np.zeros((1, self.n_envs))
 
         while self.itr < self.n_train_itr:
+            # Reinitialize environments periodically to reclaim leaked Drake memory
+            # This must happen BEFORE the memory log to measure the effect
+            if self.env_reinit_freq > 0 and self.itr > 0 and self.itr % self.env_reinit_freq == 0:
+                self._reinitialize_venv()
             # Clear episode infos for this iteration
             self._episode_infos = []
             self._episodes_this_iteration = 0
@@ -403,9 +413,11 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 firsts_trajs[0] = done_venv
 
             # Holders
+            # IMPORTANT: Use float32 to match observation dtype and avoid temporary copies
             obs_trajs = {
                 k: np.zeros(
-                    (self.n_steps, self.n_envs, self.n_cond_step, *self.obs_dims[k])
+                    (self.n_steps, self.n_envs, self.n_cond_step, *self.obs_dims[k]),
+                    dtype=np.float32
                 )
                 for k in self.obs_dims
             }
@@ -416,10 +428,11 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     self.model.ft_denoising_steps + 1,
                     self.horizon_steps,
                     self.action_dim,
-                )
+                ),
+                dtype=np.float32
             )
-            terminated_trajs = np.zeros((self.n_steps, self.n_envs))
-            reward_trajs = np.zeros((self.n_steps, self.n_envs))
+            terminated_trajs = np.zeros((self.n_steps, self.n_envs), dtype=np.float32)
+            reward_trajs = np.zeros((self.n_steps, self.n_envs), dtype=np.float32)
 
             # Collect trajectories
             for step in range(self.n_steps):

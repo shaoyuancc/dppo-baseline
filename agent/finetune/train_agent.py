@@ -48,30 +48,34 @@ class TrainAgent:
 
         # Make vectorized env
         self.env_name = cfg.env.name
-        env_type = cfg.env.get("env_type", None)
+        self._env_type = cfg.env.get("env_type", None)
         # Resolve OmegaConf interpolations before passing to make_async
         # This ensures ${act_steps} etc. are resolved to actual values
         env_specific = {}
         if "specific" in cfg.env:
             env_specific = OmegaConf.to_container(cfg.env.specific, resolve=True)
         
-        self.venv = make_async(
-            cfg.env.name,
-            env_type=env_type,
-            num_envs=cfg.env.n_envs,
-            asynchronous=True,
-            max_episode_steps=cfg.env.max_episode_steps,
-            wrappers=cfg.env.get("wrappers", None),
-            robomimic_env_cfg_path=cfg.get("robomimic_env_cfg_path", None),
-            shape_meta=cfg.get("shape_meta", None),
-            use_image_obs=cfg.env.get("use_image_obs", False),
-            render=cfg.env.get("render", False),
-            render_offscreen=cfg.env.get("save_video", False),
-            obs_dim=cfg.obs_dim,
-            action_dim=cfg.action_dim,
+        # Store kwargs for make_async so we can reinitialize the environment later
+        # This is used to periodically destroy and recreate envs to reclaim leaked memory
+        self._venv_kwargs = {
+            'id': cfg.env.name,
+            'env_type': self._env_type,
+            'num_envs': cfg.env.n_envs,
+            'asynchronous': True,
+            'max_episode_steps': cfg.env.max_episode_steps,
+            'wrappers': cfg.env.get("wrappers", None),
+            'robomimic_env_cfg_path': cfg.get("robomimic_env_cfg_path", None),
+            'shape_meta': cfg.get("shape_meta", None),
+            'use_image_obs': cfg.env.get("use_image_obs", False),
+            'render': cfg.env.get("render", False),
+            'render_offscreen': cfg.env.get("save_video", False),
+            'obs_dim': cfg.obs_dim,
+            'action_dim': cfg.action_dim,
             **env_specific,
-        )
-        if not env_type == "furniture":
+        }
+        
+        self.venv = make_async(**self._venv_kwargs)
+        if not self._env_type == "furniture":
             self.venv.seed(
                 [self.seed + i for i in range(cfg.env.n_envs)]
             )  # otherwise parallel envs might have the same initial states!
@@ -122,7 +126,7 @@ class TrainAgent:
         self.n_steps = cfg.train.n_steps
         self.best_reward_threshold_for_success = (
             len(self.venv.pairs_to_assemble)
-            if env_type == "furniture"
+            if self._env_type == "furniture"
             else cfg.env.best_reward_threshold_for_success
         )
         self.max_grad_norm = cfg.train.get("max_grad_norm", None)
@@ -249,3 +253,31 @@ class TrainAgent:
         if verbose:
             logging.info(f"<-- Reset environment {env_ind} with task {task}")
         return obs
+
+    def _reinitialize_venv(self):
+        """
+        Close and recreate the vectorized environment to reclaim memory.
+        
+        This is a workaround for memory leaks in environments that use C++ objects
+        (e.g., Drake LeafSystem) that are not properly released by Python's garbage
+        collector. By terminating and restarting worker processes, the OS reclaims
+        all memory including leaked C++ objects.
+        """
+        import gc
+        
+        log.debug("Reinitializing vectorized environment to reclaim memory...")
+        
+        # Close existing environment (terminates worker processes)
+        self.venv.close()
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Recreate environment with same parameters
+        self.venv = make_async(**self._venv_kwargs)
+        
+        # Re-seed if needed
+        if not self._env_type == "furniture":
+            self.venv.seed([self.seed + i for i in range(self.n_envs)])
+        
+        log.debug("Environment reinitialized successfully")

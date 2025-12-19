@@ -151,6 +151,10 @@ def make_async(
             AsyncVectorEnv(
                 env_fns,
                 dummy_env_fn=dummy_env_fn,
+                # Memory optimization: Don't deepcopy observations since with shared_memory=True
+                # (the default), observations are already read from shared memory into a buffer.
+                # The training loop copies obs into obs_trajs anyway, so deepcopy is wasteful.
+                copy=False,
             )
             if asynchronous
             else SyncVectorEnv(env_fns)
