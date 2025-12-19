@@ -107,7 +107,7 @@ env:
       failure_reward: -10.0    # Penetration/tracking failure
       success_reward: 10.0     # Touching the box
       # Reach task specific parameters
-      touch_threshold: 0.02       # 2cm - success when closer than this
+      touch_threshold: 0.03       # 3cm - success when closer than this
       max_reward_distance: 2.0    # distance beyond which dense bonus is zero
       dense_reward_scale: 0.05    # Small shaping bonus
       

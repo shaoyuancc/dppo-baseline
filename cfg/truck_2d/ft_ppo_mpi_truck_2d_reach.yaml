@@ -40,9 +40,9 @@ hydra:
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
 name: reach_task
-logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-reach/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+# logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-reach/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
-wandb: null
 wandb:
   entity: contact_placement
   project: truck_2d-reach-dppo
@@ -79,7 +79,7 @@ env:
   n_envs: 50
   name: ${env_name}
   env_type: truck_2d_reach
-  best_reward_threshold_for_success: 5.0  # Lower threshold for reach task
+  best_reward_threshold_for_success: 5.0
   max_episode_steps: 50
   save_video: false
   save_meshcat: true
@@ -88,7 +88,8 @@ env:
   reinit_freq: 1  # Reinitialize environments every N iterations to reclaim leaked memory
   specific:    
     # Base environment parameters
-    problem_file: "/home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl"
+    problem_file: /teamspace/studios/this_studio/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl
+    # problem_file: /home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl
     problem_index_range: [0, 145000]
     control_timestep: 0.1
     physics_timestep: 0.002
@@ -107,7 +108,7 @@ env:
       failure_reward: -10.0    # Penetration/tracking failure
       success_reward: 10.0     # Touching the box
       # Reach task specific parameters
-      touch_threshold: 0.02       # 2cm - success when closer than this
+      touch_threshold: 0.03       # 3cm - success when closer than this
       max_reward_distance: 2.0    # distance beyond which dense bonus is zero
       dense_reward_scale: 0.05    # Small shaping bonus
       
@@ -131,7 +132,7 @@ shape_meta:
 # Training Configuration
 #==============================================================================
 train:
-  n_train_itr: 301
+  n_train_itr: 200
   n_critic_warmup_itr: 2
   n_steps: 180
   gamma: 0.999
