@@ -39,7 +39,7 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: reach_task
+name: same_box
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-reach/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
@@ -76,7 +76,7 @@ use_ddim: false
 # Environment Configuration - REACH TASK
 #==============================================================================
 env:
-  n_envs: 50
+  n_envs: 26
   name: ${env_name}
   env_type: truck_2d_reach
   best_reward_threshold_for_success: 5.0
@@ -85,12 +85,12 @@ env:
   save_meshcat: true
   meshcat_save_freq: 1
   approx_n_meshcats_saved: 5
-  reinit_freq: 1  # Reinitialize environments every N iterations to reclaim leaked memory
-  specific:    
+  reinit_freq: 3  # Reinitialize environments every N iterations to reclaim leaked memory
+  specific:
     # Base environment parameters
     problem_file: /teamspace/studios/this_studio/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl
     # problem_file: /home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl
-    problem_index_range: [0, 145000]
+    problem_index_range: [0, 1]
     control_timestep: 0.1
     physics_timestep: 0.002
     init_x: 1.0
@@ -134,7 +134,7 @@ shape_meta:
 train:
   n_train_itr: 200
   n_critic_warmup_itr: 2
-  n_steps: 180
+  n_steps: 350
   gamma: 0.999
   augment: false
   grad_accumulate: 20
