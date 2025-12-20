@@ -45,8 +45,8 @@ logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-reach/${name}/${now:%Y-%m-%d}_${
 wandb: null
 # wandb:
 #   entity: contact_placement
-#   project: truck_2d-dppo
-#   run: ${now:%H-%M-%S}_${name}
+#   project: truck_2d-reach-dppo
+#   run: ${now:%Y-%m-%d}_${now:%H-%M-%S}_${name}
 
 #==============================================================================
 # MPI Checkpoint Paths
@@ -76,11 +76,11 @@ use_ddim: false
 # Environment Configuration - REACH TASK
 #==============================================================================
 env:
-  n_envs: 1
+  n_envs: 30
   name: ${env_name}
   env_type: truck_2d_reach
-  best_reward_threshold_for_success: 5.0  # Lower threshold for reach task
-  max_episode_steps: 200
+  best_reward_threshold_for_success: 0.405
+  max_episode_steps: 50
   save_video: false
   save_meshcat: true
   meshcat_save_freq: 1
@@ -131,8 +131,8 @@ shape_meta:
 # Training Configuration
 #==============================================================================
 train:
-  n_train_itr: 2
-  n_critic_warmup_itr: 2
+  n_train_itr: 3
+  n_critic_warmup_itr: 3
   n_steps: 20
   gamma: 0.999
   augment: false

@@ -310,6 +310,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         
         For truck unloading task: computes PPH, task_completion, success_rate
         For reach task (no n_boxes_total): only computes success_rate
+        Both tasks: computes avg_success_duration, avg_fail_duration
         """
         log.debug(f"Aggregating metrics from {len(self._episode_infos)} episodes")
         
@@ -320,6 +321,9 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 'avg_task_completion': 0.0,
                 'custom_success_rate': 0.0,
                 'n_episodes_completed': 0,
+                'avg_success_duration': 0.0,
+                'avg_fail_duration': 0.0,
+                'has_truck_metrics': False,
             }
         
         # Count status types for summary
@@ -327,17 +331,23 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         pph_values = []
         tc_values = []
         n_success = 0
+        success_durations = []
+        fail_durations = []
         
         for ep_info in self._episode_infos:
             is_success = ep_info.get('is_success', False)
             status = ep_info.get('status', 'unknown')
+            duration = ep_info.get('duration', 0.0)
             
             # Count statuses
             status_counts[status] = status_counts.get(status, 0) + 1
             
-            # Count successes (works for any task type)
+            # Count successes and track durations (works for any task type)
             if is_success:
                 n_success += 1
+                success_durations.append(duration)
+            else:
+                fail_durations.append(duration)
             
             # Only compute PPH and task_completion for truck unloading task
             # (reach task doesn't have n_boxes_total in ep_info)
@@ -351,19 +361,25 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 
                 # PPH calculation
                 if is_success:
-                    duration = max(0.001, ep_info.get('duration', 0))
+                    pph_duration = max(0.001, duration)
                 else:
-                    duration = timeout_duration
+                    pph_duration = timeout_duration
                 
-                if duration > 0 and n_removed >= 0:
-                    pph = (n_removed / duration) * 3600  # pieces per hour
+                if pph_duration > 0 and n_removed >= 0:
+                    pph = (n_removed / pph_duration) * 3600  # pieces per hour
                     pph_values.append(pph)
+        
+        # has_truck_metrics indicates whether PPH/task_completion are meaningful (truck unloading task)
+        has_truck_metrics = len(pph_values) > 0 or len(tc_values) > 0
         
         metrics = {
             'avg_pieces_per_hour': float(np.mean(pph_values)) if pph_values else 0.0,
             'avg_task_completion': float(np.mean(tc_values)) if tc_values else 0.0,
             'custom_success_rate': n_success / len(self._episode_infos) if self._episode_infos else 0.0,
             'n_episodes_completed': len(self._episode_infos),
+            'avg_success_duration': float(np.mean(success_durations)) if success_durations else 0.0,
+            'avg_fail_duration': float(np.mean(fail_durations)) if fail_durations else 0.0,
+            'has_truck_metrics': has_truck_metrics,
         }
         
         # Log iteration summary
@@ -513,12 +529,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     f"Agent Step {step}: rewards={reward_venv}, terminated={terminated_venv}, "
                     f"truncated={truncated_venv}"
                 )
-                
-                # Log meshcat saves (environment auto-saves meshcat when episode ends)
-                for env_ind in meshcat_env_indices:
-                    if done_venv[env_ind]:
-                        status = info_venv[env_ind].get("status", "unknown")
-                        log.info(f"Episode ended for env {env_ind} with status: {status} (meshcat auto-saved)")
+
                 
                 # Track custom metrics from info (only for episodes that ended)
                 self._compute_custom_metrics(info_venv, done_venv, step=step)
@@ -540,7 +551,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 for i in range(len(env_steps) - 1):
                     start = env_steps[i]
                     end = env_steps[i + 1]
-                    if end - start > 1:
+                    if end - start >= 1:  # Fixed: was `> 1`, excluding 1-step episodes
                         episodes_start_end.append((env_ind, start, end - 1))
             if len(episodes_start_end) > 0:
                 reward_trajs_split = [
@@ -783,10 +794,6 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                             self.critic_optimizer.zero_grad()
                             if self.learn_eta:
                                 self.eta_optimizer.zero_grad()
-                            log.info(f"run grad update at batch {batch}")
-                            log.info(
-                                f"approx_kl: {approx_kl}, update_epoch: {update_epoch}, num_batch: {num_batch}"
-                            )
 
                             if (
                                 self.target_kl is not None
@@ -850,66 +857,77 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                         f"      PPH {custom_metrics['avg_pieces_per_hour']:8.2f} | task_completion {custom_metrics['avg_task_completion']:8.4f}"
                     )
                     if self.use_wandb:
-                        wandb.log(
-                            {
-                                "success rate - eval": success_rate,
-                                "avg episode reward - eval": avg_episode_reward,
-                                "avg best reward - eval": avg_best_reward,
-                                "num episode - eval": num_episode_finished,
-                                # Custom truck_2d metrics
-                                "avg_pieces_per_hour - eval": custom_metrics['avg_pieces_per_hour'],
-                                "avg_task_completion - eval": custom_metrics['avg_task_completion'],
-                                "custom_success_rate - eval": custom_metrics['custom_success_rate'],
-                                "n_episodes_completed - eval": custom_metrics['n_episodes_completed'],
-                            },
-                            step=self.itr,
-                            commit=False,
-                        )
+                        eval_wandb_metrics = {
+                            "success rate - eval": success_rate,
+                            "avg episode reward - eval": avg_episode_reward,
+                            "avg best reward - eval": avg_best_reward,
+                            "num episode - eval": num_episode_finished,
+                            # Custom metrics (both tasks)
+                            "custom_success_rate - eval": custom_metrics['custom_success_rate'],
+                            "n_episodes_completed - eval": custom_metrics['n_episodes_completed'],
+                            "avg_success_duration - eval": custom_metrics['avg_success_duration'],
+                            "avg_fail_duration - eval": custom_metrics['avg_fail_duration'],
+                        }
+                        # Only log truck-specific metrics for truck unloading task
+                        if custom_metrics['has_truck_metrics']:
+                            eval_wandb_metrics["avg_pieces_per_hour - eval"] = custom_metrics['avg_pieces_per_hour']
+                            eval_wandb_metrics["avg_task_completion - eval"] = custom_metrics['avg_task_completion']
+                        wandb.log(eval_wandb_metrics, step=self.itr, commit=False)
                     run_results[-1]["eval_success_rate"] = success_rate
                     run_results[-1]["eval_episode_reward"] = avg_episode_reward
                     run_results[-1]["eval_best_reward"] = avg_best_reward
+                    run_results[-1]["eval_avg_success_duration"] = custom_metrics['avg_success_duration']
+                    run_results[-1]["eval_avg_fail_duration"] = custom_metrics['avg_fail_duration']
                 else:
                     log.info(
                         f"{self.itr}: step {cnt_train_step:8d} | loss {loss:8.4f} | pg loss {pg_loss:8.4f} | value loss {v_loss:8.4f} | bc loss {bc_loss:8.4f} | reward {avg_episode_reward:8.4f} | eta {eta:8.4f} | t:{time:8.4f}"
                     )
-                    log.info(
-                        f"      PPH {custom_metrics['avg_pieces_per_hour']:8.2f} | task_completion {custom_metrics['avg_task_completion']:8.4f}"
-                    )
-                    if self.use_wandb:
-                        wandb.log(
-                            {
-                                "total env step": cnt_train_step,
-                                "loss": loss,
-                                "pg loss": pg_loss,
-                                "value loss": v_loss,
-                                "bc loss": bc_loss,
-                                "eta": eta,
-                                "approx kl": approx_kl,
-                                "ratio": ratio,
-                                "clipfrac": np.mean(clipfracs),
-                                "explained variance": explained_var,
-                                "avg episode reward - train": avg_episode_reward,
-                                "num episode - train": num_episode_finished,
-                                "diffusion - min sampling std": diffusion_min_sampling_std,
-                                "actor lr": self.actor_optimizer.param_groups[0]["lr"],
-                                "critic lr": self.critic_optimizer.param_groups[0]["lr"],
-                                # Custom truck_2d metrics
-                                "avg_pieces_per_hour - train": custom_metrics['avg_pieces_per_hour'],
-                                "avg_task_completion - train": custom_metrics['avg_task_completion'],
-                                "custom_success_rate - train": custom_metrics['custom_success_rate'],
-                                "n_episodes_completed - train": custom_metrics['n_episodes_completed'],
-                                # Critic diagnostic metrics (for debugging value collapse)
-                                "critic/returns_mean": returns_mean,
-                                "critic/returns_std": returns_std,
-                                "critic/values_mean": values_mean,
-                                "critic/values_std": values_std,
-                                "critic/advantages_mean": advantages_mean,
-                                "critic/advantages_std": advantages_std,
-                            },
-                            step=self.itr,
-                            commit=True,
+                    if custom_metrics['has_truck_metrics']:
+                        log.info(
+                            f"      PPH {custom_metrics['avg_pieces_per_hour']:8.2f} | task_completion {custom_metrics['avg_task_completion']:8.4f} | success_dur {custom_metrics['avg_success_duration']:6.2f}s | fail_dur {custom_metrics['avg_fail_duration']:6.2f}s"
                         )
+                    else:
+                        log.info(
+                            f"      success_rate {custom_metrics['custom_success_rate']:8.4f} | success_dur {custom_metrics['avg_success_duration']:6.2f}s | fail_dur {custom_metrics['avg_fail_duration']:6.2f}s"
+                        )
+                    if self.use_wandb:
+                        train_wandb_metrics = {
+                            "total env step": cnt_train_step,
+                            "loss": loss,
+                            "pg loss": pg_loss,
+                            "value loss": v_loss,
+                            "bc loss": bc_loss,
+                            "eta": eta,
+                            "approx kl": approx_kl,
+                            "ratio": ratio,
+                            "clipfrac": np.mean(clipfracs),
+                            "explained variance": explained_var,
+                            "avg episode reward - train": avg_episode_reward,
+                            "num episode - train": num_episode_finished,
+                            "diffusion - min sampling std": diffusion_min_sampling_std,
+                            "actor lr": self.actor_optimizer.param_groups[0]["lr"],
+                            "critic lr": self.critic_optimizer.param_groups[0]["lr"],
+                            # Custom metrics (both tasks)
+                            "custom_success_rate - train": custom_metrics['custom_success_rate'],
+                            "n_episodes_completed - train": custom_metrics['n_episodes_completed'],
+                            "avg_success_duration - train": custom_metrics['avg_success_duration'],
+                            "avg_fail_duration - train": custom_metrics['avg_fail_duration'],
+                            # Critic diagnostic metrics (for debugging value collapse)
+                            "critic/returns_mean": returns_mean,
+                            "critic/returns_std": returns_std,
+                            "critic/values_mean": values_mean,
+                            "critic/values_std": values_std,
+                            "critic/advantages_mean": advantages_mean,
+                            "critic/advantages_std": advantages_std,
+                        }
+                        # Only log truck-specific metrics for truck unloading task
+                        if custom_metrics['has_truck_metrics']:
+                            train_wandb_metrics["avg_pieces_per_hour - train"] = custom_metrics['avg_pieces_per_hour']
+                            train_wandb_metrics["avg_task_completion - train"] = custom_metrics['avg_task_completion']
+                        wandb.log(train_wandb_metrics, step=self.itr, commit=True)
                     run_results[-1]["train_episode_reward"] = avg_episode_reward
+                    run_results[-1]["train_avg_success_duration"] = custom_metrics['avg_success_duration']
+                    run_results[-1]["train_avg_fail_duration"] = custom_metrics['avg_fail_duration']
                 with open(self.result_path, "wb") as f:
                     pickle.dump(run_results, f)
             self.itr += 1
