@@ -37,11 +37,12 @@ class CriticObs(torch.nn.Module):
             use_layernorm=use_layernorm,
         )
 
-    def forward(self, cond: Union[dict, torch.Tensor]):
+    def forward(self, cond: Union[dict, torch.Tensor], **kwargs):
         """
         cond: dict with key state/rgb; more recent obs at the end
             state: (B, To, Do)
             or (B, num_feature) from ViT encoder
+        kwargs: ignored (for API compatibility with other critics)
         """
         if isinstance(cond, dict):
             B = len(cond["state"])

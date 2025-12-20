@@ -251,11 +251,28 @@ class MPIPPODiffusion(nn.Module):
                   ...
               ...
         
+        Option 4 - Fresh MLP state-based critic (CriticObs, asymmetric actor-critic):
+        
+            model:
+              _target_: model.diffusion.mpi_ppo_diffusion.MPIPPODiffusion.from_mpi_checkpoints
+              use_pretrained_critic: false
+              critic_type: mlp
+              critic:
+                _target_: model.common.critic.CriticObs
+                cond_dim: 42  # full_state dimension (10 + max_boxes * 8)
+                mlp_dims: [256, 256, 256]
+                activation_type: Mish
+                residual_style: true
+              ...
+              
+            Note: The agent's _preprocess_obs_for_critic() extracts full_state and
+            passes it as {'state': full_state} to CriticObs.
+        
         Args:
             use_pretrained_critic: If True, load critic from checkpoint. If False, 
                 instantiate fresh critic from `critic` config.
-            critic_type: Type of fresh critic - 'mpi' for MPI ResNet, 'vit' for DPPO ViTCritic.
-                Only used when use_pretrained_critic=False.
+            critic_type: Type of fresh critic - 'mpi' for MPI ResNet, 'vit' for DPPO ViTCritic,
+                'mlp' for state-based CriticObs. Only used when use_pretrained_critic=False.
             critic: Hydra config dict for fresh critic (used when use_pretrained_critic=False)
             critic_n_obs_steps: Number of state observation steps for critic (used by AGENT,
                 not by the wrappers - wrappers receive pre-extracted observations)
@@ -337,9 +354,16 @@ class MPIPPODiffusion(nn.Module):
                 
                 # Wrap fresh critic for DPPO interface
                 wrapped_critic = MPICriticWrapperFresh(fresh_critic)
+            
+            elif critic_type == 'mlp':
+                # MLP state-based critic (CriticObs) - no wrapper needed
+                # CriticObs.forward() accepts dict with 'state' key directly
+                # The agent's _preprocess_obs_for_critic() will extract full_state
+                log.info("Using MLP state-based critic (CriticObs) - no wrapper")
+                wrapped_critic = fresh_critic
                 
             else:
-                raise ValueError(f"Unknown critic_type: {critic_type}. Must be 'mpi' or 'vit'.")
+                raise ValueError(f"Unknown critic_type: {critic_type}. Must be 'mpi', 'vit', or 'mlp'.")
             
             n_critic_params = sum(p.numel() for p in fresh_critic.parameters())
             n_trainable = sum(p.numel() for p in fresh_critic.parameters() if p.requires_grad)

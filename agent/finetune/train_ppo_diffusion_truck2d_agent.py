@@ -63,6 +63,10 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         # Allows critic to use fewer observation steps than policy (e.g., single-frame)
         self.critic_n_obs_steps = cfg.get('critic_n_obs_steps', self.n_cond_step)
         self.critic_img_cond_steps = cfg.get('critic_img_cond_steps', self.n_cond_step)
+        
+        # Critic type: 'mpi', 'vit', or 'mlp' (for asymmetric actor-critic with full_state)
+        self.critic_type = cfg.model.get('critic_type', 'mpi')
+        log.info(f"Critic type: {self.critic_type}")
         log.info(f"Critic uses {self.critic_n_obs_steps} obs steps, {self.critic_img_cond_steps} img cond steps")
         
         # Environment reinitialization frequency (to reclaim leaked Drake memory)
@@ -181,20 +185,31 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
     
     def _preprocess_obs_for_critic(self, obs):
         """
-        Preprocess observations for critic, extracting only the latest frame(s).
+        Preprocess observations for critic based on critic_type.
         
-        This allows the critic to use single-frame observations while the policy
-        uses multi-step observations, matching the MPI value network architecture.
+        For 'mpi' and 'vit' critics: extracts latest frame(s) from rgb and state.
+        For 'mlp' critic: extracts full_state for asymmetric actor-critic setup.
         
         Args:
-            obs: Dict with 'rgb' [B, T, C, H, W] and 'state' [B, T, D]
+            obs: Dict with 'rgb' [B, T, C, H, W], 'state' [B, T, D], 
+                 and optionally 'full_state' [B, T, D_full]
             
         Returns:
-            Dict with 'rgb' [B, critic_img_cond_steps, C, H, W] and 
-                       'state' [B, critic_n_obs_steps, D]
+            For mpi/vit: Dict with 'rgb' and 'state' (latest frames)
+            For mlp: Dict with 'state' key containing full_state (for CriticObs)
         """
         import torch
         
+        if self.critic_type == 'mlp':
+            # MLP critic uses full_state (privileged information)
+            # CriticObs expects {'state': [B, D]} where D is full_state_dim
+            full_state = obs['full_state']
+            if isinstance(full_state, torch.Tensor) and full_state.dim() == 3:
+                # [B, T, D] - take latest step
+                full_state = full_state[:, -1]
+            return {'state': full_state}
+        
+        # mpi/vit critics use rgb + state
         critic_obs = {}
         
         # Extract latest frames for rgb
@@ -589,12 +604,11 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             # Update models (copied from parent class with minor modifications)
             if not eval_mode:
                 with torch.no_grad():
-                    obs_trajs["rgb"] = (
-                        torch.from_numpy(obs_trajs["rgb"]).float().to(self.device)
-                    )
-                    obs_trajs["state"] = (
-                        torch.from_numpy(obs_trajs["state"]).float().to(self.device)
-                    )
+                    # Convert all observation arrays to torch tensors
+                    for k in obs_trajs:
+                        obs_trajs[k] = (
+                            torch.from_numpy(obs_trajs[k]).float().to(self.device)
+                        )
                     if self.augment:
                         rgb = einops.rearrange(
                             obs_trajs["rgb"],

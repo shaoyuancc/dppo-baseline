@@ -1,0 +1,184 @@
+# MINIMAL TEST CONFIG for MLP critic integration testing
+#
+# This config tests that the MLP critic works correctly.
+#
+# Usage:
+#   cd /home/shaoyuan/Documents/Software/motion-policy-improvement
+#   poetry run python ../dppo-baseline/script/run.py \
+#       --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d \
+#       --config-name=ft_ppo_mpi_truck_2d_mlp_critic_test
+# python script/run.py --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_mlp_critic_test
+
+defaults:
+  - _self_
+
+hydra:
+  run:
+    dir: ${logdir}
+  job_logging:
+    loggers:
+      matplotlib.axes._base:
+        level: ERROR
+      agent.finetune.train_ppo_diffusion_truck2d_agent:
+        level: DEBUG
+      model.diffusion.mpi_ppo_diffusion:
+        level: DEBUG
+      model.common.mpi_critic_wrapper:
+        level: DEBUG
+
+_target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
+
+name: mlp_critic_integration_test
+logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-test/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+
+wandb: null
+# wandb:
+#   entity: contact_placement
+#   project: truck_2d-dppo
+#   run: ${now:%H-%M-%S}_${name}
+
+#==============================================================================
+# MPI Checkpoint Paths
+#==============================================================================
+base_policy_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/checkpoints/latest.ckpt
+policy_normalizer_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/normalizer.pt
+#==============================================================================
+# Core Configuration
+#==============================================================================
+seed: 42
+device: cuda:0
+env_name: truck_2d
+obs_dim: 6
+action_dim: 5
+denoising_steps: 100
+ft_denoising_steps: 10
+cond_steps: 2
+img_cond_steps: 2
+critic_img_cond_steps: 1
+critic_n_obs_steps: 1
+horizon_steps: 32
+act_steps: 20
+use_ddim: false
+
+#==============================================================================
+# Environment Configuration - MINIMAL for testing
+#==============================================================================
+env:
+  n_envs: 2
+  name: ${env_name}
+  env_type: truck_2d
+  best_reward_threshold_for_success: 0.405
+  max_episode_steps: 50
+  save_video: false
+  save_meshcat: false
+  meshcat_save_freq: 100
+  approx_n_meshcats_saved: 0
+  reinit_freq: 1  # Reinitialize environments every N iterations to reclaim leaked memory (0 to disable)
+  specific:
+    problem_file: "/home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl"
+    problem_index_range: [0, 100]
+    control_timestep: 0.1
+    physics_timestep: 0.002
+    init_x: 1.0
+    max_boxes: 1
+    enable_tracking_failure: false
+    enable_penetration_failure: true
+    max_penetration_distance: 0.1
+    full_trajectory_mode: false
+    act_steps: ${act_steps}
+    normalize_actions: false 
+    reward_config:
+      step_reward: -0.1
+      failure_reward: -20.0
+      success_reward: 10.0
+  wrappers:
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: true
+
+shape_meta:
+  obs:
+    rgb:
+      shape: [1, 71, 192]
+    state:
+      shape: [6]
+    full_state:
+      shape: [18]
+  action:
+    shape: [5]
+
+#==============================================================================
+# Training Configuration - MINIMAL for testing
+#==============================================================================
+train:
+  n_train_itr: 2
+  n_critic_warmup_itr: 0
+  n_steps: 10
+  gamma: 0.999
+  augment: false
+  grad_accumulate: 1
+  actor_lr: 1e-5
+  actor_weight_decay: 0
+  actor_lr_scheduler:
+    first_cycle_steps: 1
+    warmup_steps: 0
+    min_lr: 1e-5
+  critic_lr: 1e-3
+  critic_weight_decay: 0
+  critic_lr_scheduler:
+    first_cycle_steps: 1
+    warmup_steps: 0
+    min_lr: 1e-3
+  save_model_freq: 100
+  val_freq: 100
+  render:
+    freq: 100
+    num: 0
+  reward_scale_running: true
+  reward_scale_const: 1.0
+  gae_lambda: 0.95
+  batch_size: 50
+  logprob_batch_size: 60
+  update_epochs: 1
+  vf_coef: 0.5
+  target_kl: 1.0
+
+#==============================================================================
+# Model - MPI PPO Diffusion with MPI ResNet Critic (SIMPLIFIED WRAPPER)
+#==============================================================================
+model:
+  _target_: model.diffusion.mpi_ppo_diffusion.MPIPPODiffusion.from_mpi_checkpoints
+  
+  policy_checkpoint_path: ${base_policy_path}
+  policy_normalizer_path: ${policy_normalizer_path}
+  
+  # Fresh MPI critic configuration (uses simplified MPICriticWrapperFresh)
+  use_pretrained_critic: false
+  critic_type: mlp  # Explicitly set to mlp (default)
+  critic:
+    _target_: model.common.critic.CriticObs
+    cond_dim: 18
+    mlp_dims: [256, 256, 256]
+    activation_type: Mish
+    residual_style: true
+  
+  ft_denoising_steps: ${ft_denoising_steps}
+  denoising_steps: ${denoising_steps}
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  device: ${device}
+  critic_n_obs_steps: ${critic_n_obs_steps}
+  critic_img_cond_steps: ${critic_img_cond_steps}
+  
+  gamma_denoising: 0.99
+  clip_ploss_coef: 0.01
+  clip_ploss_coef_base: 0.001
+  clip_ploss_coef_rate: 3
+  norm_adv: true
+  min_sampling_denoising_std: 0.1
+  min_logprob_denoising_std: 0.1
+  denoised_clip_value: 1.0
+  randn_clip_value: 3
