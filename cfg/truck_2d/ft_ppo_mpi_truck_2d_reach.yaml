@@ -39,10 +39,11 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: probs145k_nsteps1600_vitcritic_nobs2
+name: probs145k_nsteps350_resnetcritic_nobs1
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-reach/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
+# wandb: null
 wandb:
   entity: contact_placement
   project: truck_2d-reach-dppo
@@ -66,8 +67,8 @@ denoising_steps: 100
 ft_denoising_steps: 10
 cond_steps: 2
 img_cond_steps: 2
-critic_img_cond_steps: 2
-critic_n_obs_steps: 2
+critic_img_cond_steps: 1
+critic_n_obs_steps: 1
 horizon_steps: 32
 act_steps: 20
 use_ddim: false
@@ -134,7 +135,7 @@ shape_meta:
 train:
   n_train_itr: 200
   n_critic_warmup_itr: 2
-  n_steps: 1600
+  n_steps: 350
   gamma: 0.999
   augment: false
   grad_accumulate: 20
@@ -176,31 +177,37 @@ model:
   
   # Fresh ViTCritic configuration
   use_pretrained_critic: false
-  critic_type: vit  # <-- Use DPPO's ViTCritic
+  critic_type: mpi
   critic:
-    _target_: model.common.critic.ViTCritic
-    backbone:
-      _target_: model.common.vit.VitEncoder
-      obs_shape: ${shape_meta.obs.rgb.shape}
-      # num_channel = C * img_cond_steps (grayscale * history frames)
-      num_channel: ${critic_img_cond_steps}
-      img_h: 71
-      img_w: 192
-      cfg:
-        patch_size: 8
-        depth: 1
-        embed_dim: 128
-        num_heads: 4
-        embed_style: embed2
-        embed_norm: 0
-    img_cond_steps: ${critic_img_cond_steps}
-    spatial_emb: 128
-    mlp_dims: [256, 256, 256]
-    activation_type: Mish
-    residual_style: true
-    # cond_dim = state_dim * critic_n_obs_steps
-    cond_dim: ${eval:'${obs_dim} * ${critic_n_obs_steps}'}
-    augment: false  # REQUIRED: Non-square images break RandomShiftsAug
+    # This instantiates a fresh ResNet18-based value network
+    _target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork
+    img_shape: [1, 71, 192]
+    state_dim: 6
+    features_dim: 512
+    use_tanh: false  # <-- IMPORTANT: Disable Tanh for PPO (need unbounded values)
+    # _target_: model.common.critic.ViTCritic
+    # backbone:
+    #   _target_: model.common.vit.VitEncoder
+    #   obs_shape: ${shape_meta.obs.rgb.shape}
+    #   # num_channel = C * img_cond_steps (grayscale * history frames)
+    #   num_channel: ${critic_img_cond_steps}
+    #   img_h: 71
+    #   img_w: 192
+    #   cfg:
+    #     patch_size: 8
+    #     depth: 1
+    #     embed_dim: 128
+    #     num_heads: 4
+    #     embed_style: embed2
+    #     embed_norm: 0
+    # img_cond_steps: ${critic_img_cond_steps}
+    # spatial_emb: 128
+    # mlp_dims: [256, 256, 256]
+    # activation_type: Mish
+    # residual_style: true
+    # # cond_dim = state_dim * critic_n_obs_steps
+    # cond_dim: ${eval:'${obs_dim} * ${critic_n_obs_steps}'}
+    # augment: false  # REQUIRED: Non-square images break RandomShiftsAug
   
   # Model architecture params
   ft_denoising_steps: ${ft_denoising_steps}

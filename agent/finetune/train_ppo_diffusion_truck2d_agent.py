@@ -291,15 +291,14 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 
                 self._episode_infos.append(ep_info)
                 
-                # Log episode result at INFO level
                 if has_truck_metrics:
-                    log.info(
+                    log.debug(
                         f"[Env {env_idx}] Episode ended at step {step}: "
                         f"status={status}, boxes_removed={n_boxes_removed}/{n_boxes_total}, "
                         f"duration={duration:.2f}s, success={is_success}"
                     )
                 else:
-                    log.info(
+                    log.debug(
                         f"[Env {env_idx}] Episode ended at step {step}: "
                         f"status={status}, duration={duration:.2f}s, success={is_success}"
                     )
