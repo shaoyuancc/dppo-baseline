@@ -39,7 +39,7 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: probs145k_nsteps180_nenvs50_mlpcritic
+name: reach_modified_dense_reward
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-reach/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
@@ -110,8 +110,8 @@ env:
       success_reward: 10.0     # Touching the box
       # Reach task specific parameters
       touch_threshold: 0.03       # 3cm - success when closer than this
-      max_reward_distance: 2.0    # distance beyond which dense bonus is zero
-      dense_reward_scale: 0.05    # Small shaping bonus
+      max_reward_distance: 3.0    # distance beyond which dense bonus is zero
+      dense_reward_scale: 0.08    # Small shaping bonus
       
   wrappers:
     multi_step:
@@ -179,21 +179,21 @@ model:
   
   # Fresh ViTCritic configuration
   use_pretrained_critic: false
-  critic_type: mlp # mpi or mlp or vit
+  critic_type: mpi # mpi or mlp or vit
   critic:
     # MLP FULL STATE VALUE NETWORK
-    _target_: model.common.critic.CriticObs
-    cond_dim: 18
-    mlp_dims: [256, 256, 256]
-    activation_type: Mish
-    residual_style: true
+    # _target_: model.common.critic.CriticObs
+    # cond_dim: 18
+    # mlp_dims: [256, 256, 256]
+    # activation_type: Mish
+    # residual_style: true
 
     # RESNET18 VALUE NETWORK
-    # _target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork
-    # img_shape: [1, 71, 192]
-    # state_dim: 6
-    # features_dim: 512
-    # use_tanh: false  # <-- IMPORTANT: Disable Tanh for PPO (need unbounded values)
+    _target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork
+    img_shape: [1, 71, 192]
+    state_dim: 6
+    features_dim: 512
+    use_tanh: false  # <-- IMPORTANT: Disable Tanh for PPO (need unbounded values)
     
     # VIT VALUE NETWORK
     # _target_: model.common.critic.ViTCritic
