@@ -29,7 +29,7 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: multiout_160K_ckpt_actor_lr_1e-5
+name: dense_reward
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-fresh/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
@@ -71,7 +71,7 @@ use_ddim: false
 # Environment Configuration
 #==============================================================================
 env:
-  n_envs: 30
+  n_envs: 50
   name: ${env_name}
   env_type: truck_2d
   # Success threshold: with step_reward=-0.1 and act_steps=20, worst-case success
@@ -101,6 +101,14 @@ env:
       step_reward: -0.1
       failure_reward: -20.0
       success_reward: 10.0
+      # Dense reward mode
+      dense_reward_enabled: true
+      grasp_reward: 1.0
+      failed_grasp_penalty: -1.0
+      drop_reward: 2.0
+      failed_drop_penalty: -2.0
+      max_reward_distance: 3.0
+      dense_reward_scale: 0.08
   wrappers:
     multi_step:
       n_obs_steps: ${cond_steps}
@@ -114,6 +122,8 @@ shape_meta:
       shape: [1, 71, 192]
     state:
       shape: [6]
+    full_state:
+      shape: [18]
   action:
     shape: [5]
 
@@ -124,8 +134,8 @@ shape_meta:
 #==============================================================================
 train:
   n_train_itr: 200
-  n_critic_warmup_itr: 3  # More warmup iterations for fresh critic to learn
-  n_steps: 300
+  n_critic_warmup_itr: 2
+  n_steps: 180
   gamma: 0.999
   augment: false
   grad_accumulate: 20
@@ -135,7 +145,7 @@ train:
     first_cycle_steps: ${train.n_train_itr}
     warmup_steps: 5
     min_lr: 1e-5
-  critic_lr: 1e-3  # Higher LR for fresh critic to learn faster
+  critic_lr: 1e-3
   critic_weight_decay: 0
   critic_lr_scheduler:
     first_cycle_steps: ${train.n_train_itr}
@@ -150,8 +160,8 @@ train:
   reward_scale_const: 1.0
   gae_lambda: 0.95
   batch_size: 500
-  logprob_batch_size: 240
-  update_epochs: 10  # More epochs per iteration for fresh critic
+  logprob_batch_size: 1000
+  update_epochs: 10
   vf_coef: 0.5
   target_kl: 1.0
 
