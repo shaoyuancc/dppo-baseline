@@ -25,6 +25,8 @@ hydra:
         level: DEBUG
       model.common.mpi_critic_wrapper:
         level: DEBUG
+      dppo_baseline.env.truck_2d_env:
+        level: DEBUG
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
@@ -64,15 +66,15 @@ use_ddim: false
 # Environment Configuration - MINIMAL for testing
 #==============================================================================
 env:
-  n_envs: 2
+  n_envs: 1
   name: ${env_name}
   env_type: truck_2d
   best_reward_threshold_for_success: 0.405
-  max_episode_steps: 50
+  max_episode_steps: 400
   save_video: false
-  save_meshcat: false
-  meshcat_save_freq: 100
-  approx_n_meshcats_saved: 0
+  save_meshcat: true
+  meshcat_save_freq: 1
+  approx_n_meshcats_saved: 100
   reinit_freq: 1  # Reinitialize environments every N iterations to reclaim leaked memory (0 to disable)
   specific:
     problem_file: "/home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl"
@@ -91,6 +93,14 @@ env:
       step_reward: -0.1
       failure_reward: -20.0
       success_reward: 10.0
+      # Dense reward mode
+      dense_reward_enabled: true
+      grasp_reward: 1.0
+      failed_grasp_penalty: -1.0
+      drop_reward: 2.0
+      failed_drop_penalty: -2.0
+      max_reward_distance: 3.0
+      dense_reward_scale: 0.05
   wrappers:
     multi_step:
       n_obs_steps: ${cond_steps}
