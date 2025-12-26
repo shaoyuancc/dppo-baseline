@@ -127,7 +127,7 @@ shape_meta:
     state:
       shape: [6]
     full_state:
-      shape: [18]
+      shape: [19]
   action:
     shape: [5]
 
@@ -183,7 +183,7 @@ model:
   critic:
     # MLP FULL STATE VALUE NETWORK
     # _target_: model.common.critic.CriticObs
-    # cond_dim: 18
+    # cond_dim: 19
     # mlp_dims: [256, 256, 256]
     # activation_type: Mish
     # residual_style: true

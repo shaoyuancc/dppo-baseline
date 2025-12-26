@@ -125,7 +125,7 @@ shape_meta:
     state:
       shape: [6]
     full_state:
-      shape: [18]
+      shape: [19]
   action:
     shape: [5]
 

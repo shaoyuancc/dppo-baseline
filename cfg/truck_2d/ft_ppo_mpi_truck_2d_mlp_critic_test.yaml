@@ -115,7 +115,7 @@ shape_meta:
     state:
       shape: [6]
     full_state:
-      shape: [18]
+      shape: [19]  # 11 + max_boxes*8, for max_boxes=1: 11 + 8 = 19
   action:
     shape: [5]
 
@@ -169,7 +169,7 @@ model:
   critic_type: mlp  # Explicitly set to mlp (default)
   critic:
     _target_: model.common.critic.CriticObs
-    cond_dim: 18
+    cond_dim: 19  # full_state dim: 11 + max_boxes*8, for max_boxes=1: 19
     mlp_dims: [256, 256, 256]
     activation_type: Mish
     residual_style: true

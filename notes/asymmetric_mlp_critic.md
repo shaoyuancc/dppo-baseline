@@ -66,10 +66,12 @@ Modify `_get_observation()` to return `full_state` containing:
   - Length: 8 + max_boxes × 6
 - Suction info: [last_suction_cmd, is_suctioned] (2)
 - Box geometries: [w1, h1, w2, h2, ...] (max_boxes × 2)
+- min_distance_to_box: signed distance from suction tip to nearest box (1)
 
-**Total dimension**: (8 + max_boxes × 6) + 2 + (max_boxes × 2) = **10 + max_boxes × 8**
+**Total dimension**: (8 + max_boxes × 6) + 2 + (max_boxes × 2) + 1 = **11 + max_boxes × 8**
 
-For max_boxes=4: 10 + 32 = **42D**
+For max_boxes=1: 11 + 8 = **19D**
+For max_boxes=4: 11 + 32 = **43D**
 
 ### 2. Model Factory: Support `mlp` critic type
 
@@ -145,13 +147,17 @@ box_geometries = np.array(
     [[box.w, box.h] for box in self._current_boxes], dtype=np.float32
 ).flatten()
 
+# Min distance to nearest box (privileged info)
+min_distance_to_box = self._compute_min_distance_to_box()
+
 # Simple concatenation - no parsing/reordering
 full_state = np.concatenate([
     station_state.astype(np.float32),  # (8 + max_boxes*6,) - everything from Drake
     np.array([self._last_suction_cmd, is_suctioned], dtype=np.float32),  # (2,)
     box_geometries,  # (max_boxes*2,) - w,h per box
+    np.array([min_distance_to_box], dtype=np.float32),  # (1,) - distance to nearest box
 ])
-# Total: (8 + max_boxes*6) + 2 + (max_boxes*2) = 10 + max_boxes*8
+# Total: (8 + max_boxes*6) + 2 + (max_boxes*2) + 1 = 11 + max_boxes*8
 ```
 
 **Note**: Assumes n_boxes == max_boxes (no padding needed).
