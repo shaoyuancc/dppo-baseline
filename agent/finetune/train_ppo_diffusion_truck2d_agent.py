@@ -438,6 +438,10 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             
             log.debug(f"=== Starting iteration {self.itr}/{self.n_train_itr} ===")
 
+            # Define train or eval (computed early for meshcat naming)
+            eval_mode = self.itr % self.val_freq == 0 and not self.force_train
+            mode_str = "eval" if eval_mode else "train"
+
             # Prepare video and meshcat paths for each env
             options_venv = [{} for _ in range(self.n_envs)]
             if self.itr % self.render_freq == 0 and self.render_video:
@@ -456,13 +460,11 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 ))
                 for env_ind in meshcat_env_indices:
                     meshcat_path = os.path.join(
-                        self.meshcat_dir, f"itr-{self.itr}_env-{env_ind}.html"
+                        self.meshcat_dir, f"itr-{self.itr}_{mode_str}_env-{env_ind}.html"
                     )
                     options_venv[env_ind]["meshcat_path"] = meshcat_path
                     log.debug(f"Meshcat enabled for env {env_ind}: {meshcat_path}")
 
-            # Define train or eval
-            eval_mode = self.itr % self.val_freq == 0 and not self.force_train
             self.model.eval() if eval_mode else self.model.train()
             last_itr_eval = eval_mode
             
