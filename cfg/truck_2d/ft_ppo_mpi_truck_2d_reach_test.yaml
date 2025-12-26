@@ -124,6 +124,8 @@ shape_meta:
       shape: [1, 71, 192]
     state:
       shape: [6]
+    full_state:
+      shape: [18]
   action:
     shape: [5]
 
@@ -131,22 +133,22 @@ shape_meta:
 # Training Configuration
 #==============================================================================
 train:
-  n_train_itr: 3
-  n_critic_warmup_itr: 3
-  n_steps: 20
+  n_train_itr: 2
+  n_critic_warmup_itr: 0
+  n_steps: 10
   gamma: 0.999
   augment: false
   grad_accumulate: 1
-  actor_lr: 2e-5
+  actor_lr: 1e-5
   actor_weight_decay: 0
   actor_lr_scheduler:
-    first_cycle_steps: 100
+    first_cycle_steps: ${train.n_train_itr}
     warmup_steps: 0
-    min_lr: 2e-5
+    min_lr: 1e-5
   critic_lr: 1e-3
   critic_weight_decay: 0
   critic_lr_scheduler:
-    first_cycle_steps: 100
+    first_cycle_steps: ${train.n_train_itr}
     warmup_steps: 0
     min_lr: 1e-3
   save_model_freq: 50

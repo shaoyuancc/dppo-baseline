@@ -623,12 +623,20 @@ class MPIPPODiffusion(nn.Module):
         
         Overrides VPGDiffusion.p_mean_var to use MPI's architecture.
         
+        Following original DPPO pattern:
+        1. Always use frozen base actor first for ALL samples
+        2. Then overwrite only ft_indices with actor_ft predictions
+        
+        This ensures:
+        - Non-ft steps (t >= ft_denoising_steps): use frozen base actor
+        - FT steps (t < ft_denoising_steps): use finetuned actor
+        
         Args:
             x: Current noisy sample [B, Ta, Da]
             t: Timestep [B,]
             cond: Conditioning dict {'state': [B,To,Do], 'rgb': [B,To,C,H,W]}
             index: Not used for DDPM
-            use_base_policy: Whether to use frozen base policy
+            use_base_policy: Whether to use frozen base policy for ALL steps
             deterministic: Whether to use deterministic sampling
             
         Returns:
@@ -636,27 +644,23 @@ class MPIPPODiffusion(nn.Module):
             logvar: Log variance [B, Ta, Da]
             etas: Ones for DDPM (no eta learning)
         """
-        # Select actor (base or finetuned)
-        actor = self.actor if use_base_policy else self.actor_ft
-        
-        # Get noise prediction
-        noise = actor(x, t, cond=cond)
+        # ALWAYS use frozen base actor first for ALL samples
+        # This matches original DPPO behavior
+        noise = self.actor(x, t, cond=cond)
         
         # Determine which samples are in fine-tuning range
         # For DDPM: finetune steps where t < ft_denoising_steps
         ft_indices = torch.where(t < self.ft_denoising_steps)[0]
         
-        # If not using base policy and some samples are in ft range,
-        # use finetuned actor for those
-        if not use_base_policy and len(ft_indices) > 0 and len(ft_indices) < len(t):
-            # Get predictions from base actor for non-ft samples
-            base_noise = self.actor(x, t, cond=cond)
-            # Overwrite ft samples with finetuned predictions
-            noise = base_noise.clone()
-            if len(ft_indices) > 0:
-                cond_ft = {key: cond[key][ft_indices] for key in cond}
-                noise_ft = self.actor_ft(x[ft_indices], t[ft_indices], cond=cond_ft)
-                noise[ft_indices] = noise_ft
+        # Select which actor to use for finetuning steps
+        # use_base_policy=True means use base for everything (e.g., for BC loss)
+        actor_for_ft = self.actor if use_base_policy else self.actor_ft
+        
+        # Overwrite ft_indices with finetuned (or base if use_base_policy) predictions
+        if len(ft_indices) > 0:
+            cond_ft = {key: cond[key][ft_indices] for key in cond}
+            noise_ft = actor_for_ft(x[ft_indices], t[ft_indices], cond=cond_ft)
+            noise[ft_indices] = noise_ft
         
         # Predict x_0 from noise (epsilon prediction)
         # x_0 = √(1/α̅_t) * x_t - √(1/α̅_t - 1) * ε
@@ -694,10 +698,14 @@ class MPIPPODiffusion(nn.Module):
         Sample actions using MPI's diffusers-based noise scheduler.
         This produces identical results to MPI's conditional_sample method.
         
+        Following original DPPO pattern:
+        - For t >= ft_denoising_steps: use frozen base actor (base obs_encoder + base UNet)
+        - For t < ft_denoising_steps: use finetuned actor (ft obs_encoder + ft UNet)
+        
         Args:
             cond: Dict with 'state' and 'rgb' keys
             return_chain: Whether to return denoising chain
-            use_base_policy: Whether to use frozen base policy
+            use_base_policy: Whether to use frozen base policy for ALL steps
             
         Returns:
             Sample namedtuple with:
@@ -712,11 +720,15 @@ class MPIPPODiffusion(nn.Module):
         scheduler = self.mpi_noise_scheduler
         scheduler.set_timesteps(self.denoising_steps)
         
-        # Select actor
-        actor = self.actor if use_base_policy else self.actor_ft
+        # Encode observations with BOTH actors upfront (for efficiency)
+        # We'll use the appropriate encoding at each timestep
+        global_cond_base = self.actor._encode_obs(cond)
         
-        # Encode observations once (for efficiency)
-        global_cond = actor._encode_obs(cond)
+        # For ft steps, use ft actor's encoding (unless use_base_policy=True)
+        if use_base_policy:
+            global_cond_ft = global_cond_base  # Use base for everything
+        else:
+            global_cond_ft = self.actor_ft._encode_obs(cond)
         
         # Start from pure noise
         x = torch.randn((B, self.horizon_steps, self.action_dim), device=device)
@@ -728,12 +740,26 @@ class MPIPPODiffusion(nn.Module):
         if return_chain and self.ft_denoising_steps == self.denoising_steps:
             chain.append(x.clone())
         
-        # DDPM sampling using scheduler.step() - exactly like MPI
+        # DDPM sampling using scheduler.step()
+        # Switch between base and ft actors based on timestep
         for t in scheduler.timesteps:
             t_tensor = t.unsqueeze(0).expand(B).to(device)
+            t_val = t.item()
+            
+            # Determine which actor/encoding to use based on timestep
+            # t >= ft_denoising_steps: use frozen base actor
+            # t < ft_denoising_steps: use finetuned actor (unless use_base_policy)
+            if t_val >= self.ft_denoising_steps:
+                # Non-finetuning range: use frozen base actor
+                model = self.actor.model
+                global_cond = global_cond_base
+            else:
+                # Finetuning range: use ft actor (or base if use_base_policy)
+                model = self.actor.model if use_base_policy else self.actor_ft.model
+                global_cond = global_cond_base if use_base_policy else global_cond_ft
             
             # Predict noise (epsilon)
-            noise_pred = actor.model(
+            noise_pred = model(
                 sample=x,
                 timestep=t_tensor,
                 global_cond=global_cond,
@@ -743,7 +769,7 @@ class MPIPPODiffusion(nn.Module):
             x = scheduler.step(noise_pred, t, x).prev_sample
             
             # Add to chain for finetuning steps
-            if return_chain and t.item() <= self.ft_denoising_steps:
+            if return_chain and t_val <= self.ft_denoising_steps:
                 chain.append(x.clone())
         
         if return_chain:
