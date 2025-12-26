@@ -39,7 +39,7 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: reach_modified_dense_reward
+name: reach_sampling_base_ft_fix
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-reach/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
@@ -109,7 +109,7 @@ env:
       failure_reward: -10.0    # Penetration/tracking failure
       success_reward: 10.0     # Touching the box
       # Reach task specific parameters
-      touch_threshold: 0.03       # 3cm - success when closer than this
+      touch_threshold: 0.05       # success when closer than this
       max_reward_distance: 3.0    # distance beyond which dense bonus is zero
       dense_reward_scale: 0.08    # Small shaping bonus
       
@@ -135,7 +135,7 @@ shape_meta:
 # Training Configuration
 #==============================================================================
 train:
-  n_train_itr: 200
+  n_train_itr: 500
   n_critic_warmup_itr: 2
   n_steps: 180
   gamma: 0.999
