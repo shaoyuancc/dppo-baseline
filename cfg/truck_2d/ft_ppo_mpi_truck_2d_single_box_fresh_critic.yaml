@@ -58,7 +58,7 @@ env_name: truck_2d
 obs_dim: 6
 action_dim: 5
 denoising_steps: 100
-ft_denoising_steps: 50
+ft_denoising_steps: 5
 cond_steps: 2
 img_cond_steps: 2
 critic_img_cond_steps: 1
@@ -138,7 +138,7 @@ train:
   n_steps: 180
   gamma: 0.999
   augment: false
-  grad_accumulate: 100
+  grad_accumulate: 20
   actor_lr: 1e-5
   actor_weight_decay: 0
   actor_lr_scheduler:
@@ -159,8 +159,8 @@ train:
   reward_scale_running: true
   reward_scale_const: 1.0
   gae_lambda: 0.95
-  batch_size: 100
-  logprob_batch_size: 200
+  batch_size: 500
+  logprob_batch_size: 1000
   update_epochs: 10
   vf_coef: 0.5
   target_kl: 1.0
