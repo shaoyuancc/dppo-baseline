@@ -39,7 +39,7 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: reach_sampling_base_ft_fix
+name: reach_ddim
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-reach/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
@@ -71,7 +71,7 @@ critic_img_cond_steps: 1
 critic_n_obs_steps: 1
 horizon_steps: 32
 act_steps: 20
-use_ddim: false
+use_ddim: true
 
 #==============================================================================
 # Environment Configuration - REACH TASK
@@ -154,6 +154,7 @@ train:
     warmup_steps: 10
     min_lr: 1e-3
   save_model_freq: 100
+  force_train: true
   val_freq: 10
   render:
     freq: 100
@@ -241,3 +242,15 @@ model:
   denoised_clip_value: 1.0
   randn_clip_value: 3
 
+  # DDIM configuration (matching original DPPO)
+  # Set use_ddim: true to use accelerated DDIM sampling instead of DDPM
+  use_ddim: ${use_ddim}
+  ddim_steps: ${ft_denoising_steps}
+  learn_eta: false
+  eta:
+    # EtaFixed: fixed eta value (no state dependence)
+    # base_eta=1 gives DDPM-like stochasticity, eta=0 gives deterministic sampling
+    _target_: model.diffusion.eta.EtaFixed
+    base_eta: 1.0
+    min_eta: 0.1
+    max_eta: 1.0

@@ -1,7 +1,10 @@
-# REACH TASK CONFIG - Simplified validation task
+# REACH TASK CONFIG - Simplified validation task with DDIM support
 #
 # A simple "reach and touch" task where the robot must touch any box.
 # Uses dense distance-based rewards with step penalty to encourage fast completion.
+#
+# Supports both DDPM (use_ddim: false) and DDIM (use_ddim: true) sampling.
+# For DDIM, set ddim_steps to the number of accelerated sampling steps.
 #
 # Reward design:
 #   - Step penalty: -0.1 (time cost, always negative)
@@ -63,14 +66,19 @@ env_name: truck_2d_reach
 obs_dim: 6
 action_dim: 5
 denoising_steps: 100
-ft_denoising_steps: 10
+ft_denoising_steps: 5
 cond_steps: 2
 img_cond_steps: 2
 critic_img_cond_steps: 1
 critic_n_obs_steps: 1
 horizon_steps: 32
 act_steps: 20
-use_ddim: false
+
+# DDIM Configuration (set use_ddim: true to enable accelerated sampling)
+# When use_ddim is true:
+#   - ddim_steps: total number of DDIM sampling steps (must be >= ft_denoising_steps)
+#   - eta controls variance: 0 = deterministic, 1 = DDPM-like stochasticity
+use_ddim: true
 
 #==============================================================================
 # Environment Configuration - REACH TASK
@@ -107,9 +115,9 @@ env:
       failure_reward: -10.0    # Penetration/tracking failure
       success_reward: 10.0     # Touching the box
       # Reach task specific parameters
-      touch_threshold: 0.03       # 3cm - success when closer than this
-      max_reward_distance: 2.0    # distance beyond which dense bonus is zero
-      dense_reward_scale: 0.05    # Small shaping bonus
+      touch_threshold: 0.05       # success when closer than this
+      max_reward_distance: 3.0    # distance beyond which dense bonus is zero
+      dense_reward_scale: 0.08    # Small shaping bonus
       
   wrappers:
     multi_step:
@@ -193,6 +201,7 @@ model:
   critic_n_obs_steps: ${critic_n_obs_steps}
   critic_img_cond_steps: ${critic_img_cond_steps}
   
+  # PPO hyperparameters
   gamma_denoising: 0.99
   clip_ploss_coef: 0.01
   clip_ploss_coef_base: 0.001
@@ -202,3 +211,16 @@ model:
   min_logprob_denoising_std: 0.1
   denoised_clip_value: 1.0
   randn_clip_value: 3
+  
+  # DDIM configuration (matching original DPPO)
+  # Set use_ddim: true to use accelerated DDIM sampling instead of DDPM
+  use_ddim: ${use_ddim}
+  ddim_steps: ${ft_denoising_steps}
+  learn_eta: false
+  eta:
+    # EtaFixed: fixed eta value (no state dependence)
+    # base_eta=1 gives DDPM-like stochasticity, eta=0 gives deterministic sampling
+    _target_: model.diffusion.eta.EtaFixed
+    base_eta: 1.0
+    min_eta: 0.1
+    max_eta: 1.0

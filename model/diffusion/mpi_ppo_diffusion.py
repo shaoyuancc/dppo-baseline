@@ -4,9 +4,11 @@ MPI-DPPO Integration: PPO Diffusion with MPI's policy architecture.
 This module provides wrapper classes to adapt MPI's DiffusionUnetHybridImageTargetedPolicy
 to DPPO's training interface, enabling PPO-based finetuning of MPI checkpoints.
 
+Supports both DDPM and DDIM sampling via the `use_ddim` flag, matching original DPPO behavior.
+
 Key components:
 - MPIPolicyActorWrapper: Wraps MPI's obs_encoder + UNet for DPPO-compatible interface
-- MPIPPODiffusion: DPPO model using MPI's architecture with DDPM sampling
+- MPIPPODiffusion: DPPO model using MPI's architecture with DDPM/DDIM sampling
 
 Usage in config:
     model:
@@ -15,6 +17,8 @@ Usage in config:
       policy_normalizer_path: /path/to/normalizer.pt
       critic_checkpoint_path: /path/to/critic.pt
       critic_normalizer_path: /path/to/critic_normalizer.pt
+      use_ddim: false  # Set to true for DDIM sampling
+      ddim_steps: 5    # Required when use_ddim=true
       ...
 """
 
@@ -166,7 +170,7 @@ class MPIPPODiffusion(nn.Module):
     
     Standalone implementation that:
     1. Uses MPI's obs_encoder + UNet for the actor
-    2. Uses DDPM for denoising (not DDIM)
+    2. Supports both DDPM and DDIM sampling (controlled by use_ddim flag)
     3. Provides all methods needed for DPPO training
     
     Use the `from_mpi_checkpoints` classmethod to instantiate from config.
@@ -207,6 +211,12 @@ class MPIPPODiffusion(nn.Module):
         denoised_clip_value: float = 1.0,
         randn_clip_value: float = 10,
         final_action_clip_value: float = None,
+        # DDIM params (matching original DPPO)
+        use_ddim: bool = False,
+        ddim_steps: int = None,
+        ddim_discretize: str = "uniform",
+        eta = None,  # Hydra config for eta model (e.g., EtaFixed)
+        learn_eta: bool = False,
         **kwargs,
     ):
         """
@@ -390,6 +400,12 @@ class MPIPPODiffusion(nn.Module):
             denoised_clip_value=denoised_clip_value,
             randn_clip_value=randn_clip_value,
             final_action_clip_value=final_action_clip_value,
+            # DDIM params
+            use_ddim=use_ddim,
+            ddim_steps=ddim_steps,
+            ddim_discretize=ddim_discretize,
+            eta=eta,
+            learn_eta=learn_eta,
         )
     
     @staticmethod
@@ -476,6 +492,12 @@ class MPIPPODiffusion(nn.Module):
         denoised_clip_value: float = 1.0,
         randn_clip_value: float = 10,
         final_action_clip_value: float = None,
+        # DDIM params
+        use_ddim: bool = False,
+        ddim_steps: int = None,
+        ddim_discretize: str = "uniform",
+        eta = None,
+        learn_eta: bool = False,
         **kwargs,
     ):
         """Initialize from already-loaded MPI policy and critic."""
@@ -487,14 +509,17 @@ class MPIPPODiffusion(nn.Module):
         self.action_dim = action_dim
         self.denoising_steps = denoising_steps
         self.predict_epsilon = True
-        self.use_ddim = False
-        self.ddim_steps = None
+        
+        # DDIM configuration
+        self.use_ddim = use_ddim
+        self.ddim_steps = ddim_steps
+        self.ddim_discretize = ddim_discretize
         
         # Clipping
         self.denoised_clip_value = denoised_clip_value
         self.randn_clip_value = randn_clip_value
         self.final_action_clip_value = final_action_clip_value
-        self.eps_clip_value = None
+        self.eps_clip_value = None  # Used only for DDIM epsilon clipping
         
         # Create actor wrapper
         self.actor = MPIPolicyActorWrapper(
@@ -545,15 +570,45 @@ class MPIPPODiffusion(nn.Module):
         self.clip_advantage_lower_quantile = 0
         self.clip_advantage_upper_quantile = 1
         
-        # No eta for DDPM
-        self.learn_eta = False
-        self.eta = None
+        # Validate DDIM configuration
+        assert ft_denoising_steps <= denoising_steps, \
+            f"ft_denoising_steps ({ft_denoising_steps}) must be <= denoising_steps ({denoising_steps})"
+        if use_ddim:
+            assert ddim_steps is not None, "ddim_steps must be specified when use_ddim=True"
+            assert ft_denoising_steps <= ddim_steps, \
+                f"ft_denoising_steps ({ft_denoising_steps}) must be <= ddim_steps ({ddim_steps})"
+            assert not (learn_eta and not use_ddim), "Cannot learn eta with DDPM"
         
-        # DDPM parameters - sync with MPI scheduler if available
+        # Eta model for DDIM variance control
+        # For DDPM, eta is not used (variance is fixed by the schedule)
+        self.learn_eta = learn_eta
+        if use_ddim and eta is not None:
+            # Handle eta: may be already instantiated or a config dict
+            if isinstance(eta, nn.Module):
+                self.eta = eta.to(self.device)
+            else:
+                # Instantiate from hydra config
+                self.eta = hydra.utils.instantiate(eta).to(self.device)
+            if not learn_eta:
+                for param in self.eta.parameters():
+                    param.requires_grad = False
+                log.info("Turned off gradients for eta (not learning)")
+            log.info("Initialized eta model: %s", type(self.eta).__name__)
+        else:
+            self.eta = None
+        
+        # DDPM parameters - always needed for log prob computation
         self._setup_ddpm_params(denoising_steps)
         
-        log.info(f"MPIPPODiffusion: {denoising_steps} steps, finetuning last {ft_denoising_steps}")
-        log.info(f"  use_mpi_scheduler={self.use_mpi_scheduler}")
+        # DDIM parameters - only setup if using DDIM
+        if use_ddim:
+            self._setup_ddim_params(denoising_steps, ddim_steps, ddim_discretize)
+            # Disable MPI scheduler for DDIM (use our implementation)
+            self.use_mpi_scheduler = False
+            log.info("MPIPPODiffusion: DDIM with %d steps, finetuning last %d", ddim_steps, ft_denoising_steps)
+        else:
+            log.info("MPIPPODiffusion: DDPM with %d steps, finetuning last %d", denoising_steps, ft_denoising_steps)
+            log.info("  use_mpi_scheduler=%s", self.use_mpi_scheduler)
     
     def _setup_ddpm_params(self, denoising_steps: int):
         """
@@ -609,6 +664,75 @@ class MPIPPODiffusion(nn.Module):
             (1.0 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
         )
     
+    def _setup_ddim_params(self, denoising_steps: int, ddim_steps: int, ddim_discretize: str):
+        """
+        Set up DDIM-specific parameters for accelerated sampling.
+        
+        DDIM (Denoising Diffusion Implicit Models) allows for faster sampling by
+        using a non-Markovian process. This method sets up the timestep schedule
+        and alpha values needed for DDIM sampling.
+        
+        Following the original DPPO implementation in diffusion.py lines 155-196.
+        
+        Args:
+            denoising_steps: Total number of DDPM denoising steps (e.g., 100)
+            ddim_steps: Number of DDIM steps to use (e.g., 5)
+            ddim_discretize: How to select DDIM timesteps ("uniform" supported)
+        """
+        assert self.predict_epsilon, "DDIM requires predicting epsilon"
+        
+        # Create DDIM timestep schedule
+        # uniform: evenly spaced timesteps from the full schedule
+        if ddim_discretize == "uniform":
+            step_ratio = denoising_steps // ddim_steps
+            # ddim_t contains the actual timestep values (e.g., [0, 20, 40, 60, 80] for 5 steps)
+            self.ddim_t = (
+                torch.arange(0, ddim_steps, device=self.device) * step_ratio
+            )
+        else:
+            raise ValueError(f"Unknown DDIM discretization method: {ddim_discretize}")
+        
+        # Extract alpha values at DDIM timesteps
+        # α̅_t at DDIM timesteps
+        self.ddim_alphas = (
+            self.alphas_cumprod[self.ddim_t].clone().to(torch.float32)
+        )
+        # √α̅_t
+        self.ddim_alphas_sqrt = torch.sqrt(self.ddim_alphas)
+        # α̅_{t-1} (previous step's cumulative alpha)
+        self.ddim_alphas_prev = torch.cat(
+            [
+                torch.tensor([1.0]).to(torch.float32).to(self.device),
+                self.alphas_cumprod[self.ddim_t[:-1]],
+            ]
+        )
+        # √(1-α̅_t)
+        self.ddim_sqrt_one_minus_alphas = (1.0 - self.ddim_alphas) ** 0.5
+        
+        # Initialize fixed sigmas for inference with eta=0 (deterministic DDIM)
+        # σ_t = η * √((1-α̅_{t-1})/(1-α̅_t)) * √(1 - α̅_t/α̅_{t-1})
+        ddim_eta = 0  # Deterministic by default, can be overridden by eta model
+        self.ddim_sigmas = (
+            ddim_eta
+            * (
+                (1 - self.ddim_alphas_prev)
+                / (1 - self.ddim_alphas)
+                * (1 - self.ddim_alphas / self.ddim_alphas_prev)
+            )
+            ** 0.5
+        )
+        
+        # Flip all arrays for reverse diffusion (sampling goes from T to 0)
+        # After flip: indices go high-to-low timestep
+        self.ddim_t = torch.flip(self.ddim_t, [0])
+        self.ddim_alphas = torch.flip(self.ddim_alphas, [0])
+        self.ddim_alphas_sqrt = torch.flip(self.ddim_alphas_sqrt, [0])
+        self.ddim_alphas_prev = torch.flip(self.ddim_alphas_prev, [0])
+        self.ddim_sqrt_one_minus_alphas = torch.flip(self.ddim_sqrt_one_minus_alphas, [0])
+        self.ddim_sigmas = torch.flip(self.ddim_sigmas, [0])
+        
+        log.info("DDIM schedule: %d steps, timesteps=%s", ddim_steps, self.ddim_t.tolist())
+    
     def p_mean_var(
         self,
         x,
@@ -621,36 +745,47 @@ class MPIPPODiffusion(nn.Module):
         """
         Compute mean and variance for denoising step.
         
-        Overrides VPGDiffusion.p_mean_var to use MPI's architecture.
-        
-        Following original DPPO pattern:
+        Supports both DDPM and DDIM sampling, following the original DPPO pattern:
         1. Always use frozen base actor first for ALL samples
         2. Then overwrite only ft_indices with actor_ft predictions
         
-        This ensures:
-        - Non-ft steps (t >= ft_denoising_steps): use frozen base actor
-        - FT steps (t < ft_denoising_steps): use finetuned actor
+        For DDPM:
+        - FT steps: t < ft_denoising_steps
+        - Uses DDPM posterior variance formula
+        
+        For DDIM:
+        - FT steps: index >= (ddim_steps - ft_denoising_steps)
+        - Uses learned eta model for variance control
         
         Args:
             x: Current noisy sample [B, Ta, Da]
-            t: Timestep [B,]
+            t: Timestep [B,] (actual diffusion timestep values)
             cond: Conditioning dict {'state': [B,To,Do], 'rgb': [B,To,C,H,W]}
-            index: Not used for DDPM
+            index: DDIM step index [B,] (0 to ddim_steps-1), required for DDIM
             use_base_policy: Whether to use frozen base policy for ALL steps
-            deterministic: Whether to use deterministic sampling
+            deterministic: Whether to use deterministic sampling (eta=0 for DDIM)
             
         Returns:
             mu: Mean [B, Ta, Da]
             logvar: Log variance [B, Ta, Da]
-            etas: Ones for DDPM (no eta learning)
+            etas: Eta values [B, 1, 1] or [B, 1, Da] for DDIM, ones for DDPM
         """
         # ALWAYS use frozen base actor first for ALL samples
         # This matches original DPPO behavior
         noise = self.actor(x, t, cond=cond)
         
         # Determine which samples are in fine-tuning range
-        # For DDPM: finetune steps where t < ft_denoising_steps
-        ft_indices = torch.where(t < self.ft_denoising_steps)[0]
+        # The logic differs between DDPM and DDIM
+        if self.use_ddim:
+            # For DDIM: finetune the last ft_denoising_steps based on index
+            # index goes from 0 (high timestep) to ddim_steps-1 (low timestep)
+            # FT range: index >= (ddim_steps - ft_denoising_steps)
+            ft_indices = torch.where(
+                index >= (self.ddim_steps - self.ft_denoising_steps)
+            )[0]
+        else:
+            # For DDPM: finetune steps where t < ft_denoising_steps
+            ft_indices = torch.where(t < self.ft_denoising_steps)[0]
         
         # Select which actor to use for finetuning steps
         # use_base_policy=True means use base for everything (e.g., for BC loss)
@@ -663,28 +798,71 @@ class MPIPPODiffusion(nn.Module):
             noise[ft_indices] = noise_ft
         
         # Predict x_0 from noise (epsilon prediction)
-        # x_0 = √(1/α̅_t) * x_t - √(1/α̅_t - 1) * ε
-        x_recon = (
-            extract(self.sqrt_recip_alphas_cumprod, t, x.shape) * x
-            - extract(self.sqrt_recipm1_alphas_cumprod, t, x.shape) * noise
-        )
+        if self.predict_epsilon:
+            if self.use_ddim:
+                # DDIM x_0 reconstruction: x₀ = (xₜ - √(1-αₜ) * ε) / √αₜ
+                alpha = extract(self.ddim_alphas, index, x.shape)
+                alpha_prev = extract(self.ddim_alphas_prev, index, x.shape)
+                sqrt_one_minus_alpha = extract(
+                    self.ddim_sqrt_one_minus_alphas, index, x.shape
+                )
+                x_recon = (x - sqrt_one_minus_alpha * noise) / (alpha**0.5)
+            else:
+                # DDPM x_0 reconstruction: x₀ = √(1/α̅ₜ) * xₜ - √(1/α̅ₜ - 1) * ε
+                x_recon = (
+                    extract(self.sqrt_recip_alphas_cumprod, t, x.shape) * x
+                    - extract(self.sqrt_recipm1_alphas_cumprod, t, x.shape) * noise
+                )
+        else:
+            # Directly predicting x_0
+            x_recon = noise
         
         # Clip reconstructed sample
         if self.denoised_clip_value is not None:
             x_recon.clamp_(-self.denoised_clip_value, self.denoised_clip_value)
+            if self.use_ddim:
+                # Re-calculate noise based on clamped x_recon for DDIM
+                noise = (x - alpha ** (0.5) * x_recon) / sqrt_one_minus_alpha
         
-        # Compute posterior mean
-        # μ_t = β̃_t * √α̅_{t-1} / (1-α̅_t) * x_0 + √α_t * (1-α̅_{t-1}) / (1-α̅_t) * x_t
-        mu = (
-            extract(self.ddpm_mu_coef1, t, x.shape) * x_recon
-            + extract(self.ddpm_mu_coef2, t, x.shape) * x
-        )
+        # Clip epsilon for numerical stability in policy gradient (DDIM only)
+        if self.use_ddim and self.eps_clip_value is not None:
+            noise.clamp_(-self.eps_clip_value, self.eps_clip_value)
         
-        # Get log variance
-        logvar = extract(self.ddpm_logvar_clipped, t, x.shape)
-        
-        # Return ones for eta (DDPM doesn't use learned eta)
-        etas = torch.ones_like(mu).to(mu.device)
+        # Compute mean and variance based on sampling method
+        if self.use_ddim:
+            # DDIM: μ = √α_{t-1} * x₀ + √(1-α_{t-1} - σ²) * ε
+            if deterministic:
+                # Deterministic DDIM: eta = 0
+                etas = torch.zeros((x.shape[0], 1, 1)).to(x.device)
+            else:
+                # Use eta model for stochastic DDIM
+                etas = self.eta(cond).unsqueeze(1)  # B x 1 x (Da or 1)
+            
+            # Compute sigma using eta
+            # σ = η * √((1-α_{t-1})/(1-αₜ) * (1 - αₜ/α_{t-1}))
+            sigma = (
+                etas
+                * ((1 - alpha_prev) / (1 - alpha) * (1 - alpha / alpha_prev)) ** 0.5
+            ).clamp_(min=1e-10)
+            
+            # Direction pointing to x_t coefficient
+            dir_xt_coef = (1.0 - alpha_prev - sigma**2).clamp_(min=0).sqrt()
+            
+            # Mean: μ = √α_{t-1} * x₀ + dir_xt_coef * ε
+            mu = (alpha_prev**0.5) * x_recon + dir_xt_coef * noise
+            
+            # Variance
+            var = sigma**2
+            logvar = torch.log(var)
+        else:
+            # DDPM: μₜ = β̃ₜ * √α̅_{t-1}/(1-α̅ₜ) * x₀ + √αₜ * (1-α̅_{t-1})/(1-α̅ₜ) * xₜ
+            mu = (
+                extract(self.ddpm_mu_coef1, t, x.shape) * x_recon
+                + extract(self.ddpm_mu_coef2, t, x.shape) * x
+            )
+            logvar = extract(self.ddpm_logvar_clipped, t, x.shape)
+            # For DDPM, eta is always 1 (fixed variance)
+            etas = torch.ones_like(mu).to(mu.device)
         
         return mu, logvar, etas
     
@@ -786,32 +964,38 @@ class MPIPPODiffusion(nn.Module):
         use_base_policy=False,
     ):
         """
-        Sample actions using DDPM.
+        Sample actions using DDPM or DDIM depending on configuration.
         
-        If use_mpi_scheduler is True, uses the diffusers-based scheduler
-        for exact compatibility with MPI's sampling. Otherwise uses custom
-        DDPM implementation.
+        For DDPM with use_mpi_scheduler=True: uses the diffusers-based scheduler
+        for exact compatibility with MPI's sampling.
+        
+        For DDIM or DDPM with use_mpi_scheduler=False: uses our custom implementation
+        that supports fine-tuning with policy gradient.
         
         Args:
-            cond: Dict with 'state' and 'rgb' keys
-            deterministic: If True, use zero noise at t=0 (only for custom sampling)
-            return_chain: Whether to return denoising chain
-            use_base_policy: Whether to use frozen base policy
+            cond: dict with key state/rgb; more recent obs at the end
+                state: (B, To, Do)
+                rgb: (B, To, C, H, W)
+            deterministic: If true, then std=0 with DDIM, or with DDPM, use normal
+                schedule (instead of clipping at a higher value)
+            return_chain: whether to return the entire chain of denoised actions
+            use_base_policy: whether to use the frozen pre-trained policy instead
             
         Returns:
             Sample namedtuple with:
                 trajectories: Final actions [B, Ta, Da]
                 chains: Denoising chain [B, K+1, Ta, Da] if return_chain else None
         """
-        # Use MPI scheduler for inference if available and enabled
-        if self.use_mpi_scheduler and hasattr(self, 'mpi_noise_scheduler'):
+        # Use MPI scheduler for DDPM inference if available and enabled
+        # (DDIM uses our custom implementation to support eta model)
+        if not self.use_ddim and self.use_mpi_scheduler and hasattr(self, 'mpi_noise_scheduler'):
             return self._sample_with_mpi_scheduler(
                 cond=cond,
                 return_chain=return_chain,
                 use_base_policy=use_base_policy,
             )
         
-        # Fallback to custom DDPM implementation
+        # Custom DDPM/DDIM implementation
         device = self.betas.device
         sample_data = cond["state"] if "state" in cond else cond["rgb"]
         B = len(sample_data)
@@ -822,35 +1006,52 @@ class MPIPPODiffusion(nn.Module):
         # Start from pure noise
         x = torch.randn((B, self.horizon_steps, self.action_dim), device=device)
         
-        # DDPM timesteps (T-1 to 0)
-        t_all = list(reversed(range(self.denoising_steps)))
+        # Timestep schedule depends on DDPM vs DDIM
+        if self.use_ddim:
+            t_all = self.ddim_t  # Already in reverse order (high to low timestep)
+        else:
+            t_all = list(reversed(range(self.denoising_steps)))
         
         # Collect chain if requested
         chain = [] if return_chain else None
         
         # Add initial noise to chain if finetuning all steps
-        if return_chain and self.ft_denoising_steps == self.denoising_steps:
-            chain.append(x.clone())
+        if not self.use_ddim and self.ft_denoising_steps == self.denoising_steps:
+            if return_chain:
+                chain.append(x)
+        if self.use_ddim and self.ft_denoising_steps == self.ddim_steps:
+            if return_chain:
+                chain.append(x)
         
         for i, t in enumerate(t_all):
             t_b = make_timesteps(B, t, device)
+            index_b = make_timesteps(B, i, device)
             
             mean, logvar, _ = self.p_mean_var(
                 x=x,
                 t=t_b,
                 cond=cond,
+                index=index_b,
                 use_base_policy=use_base_policy,
                 deterministic=deterministic,
             )
             std = torch.exp(0.5 * logvar)
             
             # Determine noise level
-            if deterministic and t == 0:
-                std = torch.zeros_like(std)
-            elif deterministic:
-                std = torch.clip(std, min=1e-3)
+            if self.use_ddim:
+                # DDIM noise handling
+                if deterministic:
+                    std = torch.zeros_like(std)
+                else:
+                    std = torch.clip(std, min=min_sampling_denoising_std)
             else:
-                std = torch.clip(std, min=min_sampling_denoising_std)
+                # DDPM noise handling
+                if deterministic and t == 0:
+                    std = torch.zeros_like(std)
+                elif deterministic:
+                    std = torch.clip(std, min=1e-3)
+                else:
+                    std = torch.clip(std, min=min_sampling_denoising_std)
             
             # Sample
             noise = torch.randn_like(x).clamp_(
@@ -865,8 +1066,11 @@ class MPIPPODiffusion(nn.Module):
                 )
             
             # Add to chain for finetuning steps
-            if return_chain and t <= self.ft_denoising_steps:
-                chain.append(x.clone())
+            if return_chain:
+                if not self.use_ddim and t <= self.ft_denoising_steps:
+                    chain.append(x)
+                elif self.use_ddim and i >= (self.ddim_steps - self.ft_denoising_steps - 1):
+                    chain.append(x)
         
         if return_chain:
             chain = torch.stack(chain, dim=1)
@@ -915,21 +1119,26 @@ class MPIPPODiffusion(nn.Module):
         use_base_policy: bool = False,
     ):
         """
-        Compute log probabilities of denoised action chains.
+        Compute log probabilities of the entire chain of denoised actions.
+        
+        Supports both DDPM and DDIM. For DDIM, uses ddim_t timesteps and
+        index-based addressing into the DDIM schedule.
         
         Args:
-            cond: Dict with 'state' and 'rgb' keys
-            chains: Denoising chain [B, K+1, Ta, Da]
-            get_ent: Whether to return entropy
-            use_base_policy: Whether to use base policy
+            cond: dict with key state/rgb; more recent obs at the end
+                state: (B, To, Do)
+                rgb: (B, To, C, H, W)
+            chains: (B, K+1, Ta, Da) where K = ft_denoising_steps
+            get_ent: flag for returning entropy (actually returns eta)
+            use_base_policy: flag for using base policy
             
         Returns:
-            logprobs: [B*K, Ta, Da]
-            entropy: [B*K, Ta] if get_ent else None
+            logprobs: (B x K, Ta, Da)
+            eta (if get_ent=True): (B x K, Ta)
         """
         from torch.distributions import Normal
         
-        # Repeat cond for denoising steps
+        # Repeat cond for denoising steps, flatten batch and time dimensions
         cond_expanded = {
             key: cond[key]
             .unsqueeze(1)
@@ -938,27 +1147,52 @@ class MPIPPODiffusion(nn.Module):
             for key in cond
         }
         
-        # DDPM timesteps for fine-tuning range
-        t_single = torch.arange(
-            start=self.ft_denoising_steps - 1,
-            end=-1,
-            step=-1,
-            device=self.device,
-        )
+        # Get timesteps based on DDPM or DDIM
+        if self.use_ddim:
+            # DDIM: use the last ft_denoising_steps from ddim_t
+            t_single = self.ddim_t[-self.ft_denoising_steps:]
+        else:
+            # DDPM: timesteps from ft_denoising_steps-1 down to 0
+            t_single = torch.arange(
+                start=self.ft_denoising_steps - 1,
+                end=-1,
+                step=-1,
+                device=self.device,
+            )
+        # Repeat for each batch item: [4,3,2,1,0, 4,3,2,1,0, ...]
         t_all = t_single.repeat(chains.shape[0], 1).flatten()
         
-        # Split chains into prev/next
-        chains_prev = chains[:, :-1].reshape(-1, self.horizon_steps, self.action_dim)
-        chains_next = chains[:, 1:].reshape(-1, self.horizon_steps, self.action_dim)
+        # For DDIM, also need indices into the DDIM schedule
+        if self.use_ddim:
+            indices_single = torch.arange(
+                start=self.ddim_steps - self.ft_denoising_steps,
+                end=self.ddim_steps,
+                device=self.device,
+            )
+            indices = indices_single.repeat(chains.shape[0])
+        else:
+            indices = None
         
-        # Get mean/var
+        # Split chains into prev/next pairs
+        chains_prev = chains[:, :-1]
+        chains_next = chains[:, 1:]
+        
+        # Flatten first two dimensions: (B, K, Ta, Da) -> (B*K, Ta, Da)
+        chains_prev = chains_prev.reshape(-1, self.horizon_steps, self.action_dim)
+        chains_next = chains_next.reshape(-1, self.horizon_steps, self.action_dim)
+        
+        # Get mean/var from forward pass
         mean, logvar, eta = self.p_mean_var(
-            chains_prev, t_all, cond=cond_expanded, use_base_policy=use_base_policy
+            chains_prev,
+            t_all,
+            cond=cond_expanded,
+            index=indices,
+            use_base_policy=use_base_policy,
         )
         std = torch.exp(0.5 * logvar)
         std = torch.clip(std, min=self.min_logprob_denoising_std)
         
-        # Compute log prob
+        # Compute log prob with Gaussian
         dist = Normal(mean, std)
         log_prob = dist.log_prob(chains_next)
         
@@ -976,39 +1210,68 @@ class MPIPPODiffusion(nn.Module):
         use_base_policy: bool = False,
     ):
         """
-        Compute log probabilities for subsampled denoising steps.
+        Compute log probabilities for random samples of denoised chains.
+        
+        This is used during PPO training where we subsample denoising steps
+        for efficiency rather than computing logprobs for all steps.
+        
+        Supports both DDPM and DDIM. For DDIM, uses ddim_t timesteps and
+        index-based addressing into the DDIM schedule.
         
         Args:
-            cond: Dict with 'state' and 'rgb'
+            cond: dict with key state/rgb; more recent obs at the end
+                state: (B, To, Do)
+                rgb: (B, To, C, H, W)
             chains_prev: Previous chain states [B, Ta, Da]
             chains_next: Next chain states [B, Ta, Da]
-            denoising_inds: Indices of denoising steps [B,]
-            get_ent: Whether to return entropy
-            use_base_policy: Whether to use base policy
+            denoising_inds: Indices of denoising steps [B,] (0 to ft_denoising_steps-1)
+            get_ent: flag for returning entropy (actually returns eta)
+            use_base_policy: flag for using base policy
             
         Returns:
-            logprobs: [B, Ta, Da]
-            eta: [B, Ta] if get_ent
+            logprobs: (B, Ta, Da)
+            eta (if get_ent=True): (B, Ta)
         """
         from torch.distributions import Normal
         
-        # Get timesteps for these indices
-        t_single = torch.arange(
-            start=self.ft_denoising_steps - 1,
-            end=-1,
-            step=-1,
-            device=self.device,
-        )
+        # Get timesteps for these indices based on DDPM or DDIM
+        if self.use_ddim:
+            # DDIM: use the last ft_denoising_steps from ddim_t
+            t_single = self.ddim_t[-self.ft_denoising_steps:]
+        else:
+            # DDPM: timesteps from ft_denoising_steps-1 down to 0
+            t_single = torch.arange(
+                start=self.ft_denoising_steps - 1,
+                end=-1,
+                step=-1,
+                device=self.device,
+            )
+        # Select timesteps for the subsampled indices
         t_all = t_single[denoising_inds]
         
-        # Get mean/var
+        # For DDIM, also need indices into the DDIM schedule
+        if self.use_ddim:
+            ddim_indices_single = torch.arange(
+                start=self.ddim_steps - self.ft_denoising_steps,
+                end=self.ddim_steps,
+                device=self.device,
+            )
+            ddim_indices = ddim_indices_single[denoising_inds]
+        else:
+            ddim_indices = None
+        
+        # Get mean/var from forward pass
         mean, logvar, eta = self.p_mean_var(
-            chains_prev, t_all, cond=cond, use_base_policy=use_base_policy
+            chains_prev,
+            t_all,
+            cond=cond,
+            index=ddim_indices,
+            use_base_policy=use_base_policy,
         )
         std = torch.exp(0.5 * logvar)
         std = torch.clip(std, min=self.min_logprob_denoising_std)
         
-        # Compute log prob
+        # Compute log prob with Gaussian
         dist = Normal(mean, std)
         log_prob = dist.log_prob(chains_next)
         
