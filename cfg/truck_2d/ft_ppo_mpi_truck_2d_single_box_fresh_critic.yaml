@@ -29,7 +29,7 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: dense_reward
+name: single_box_ddpm_sampling_fix_ft_denoise_50
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-fresh/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
@@ -58,7 +58,7 @@ env_name: truck_2d
 obs_dim: 6
 action_dim: 5
 denoising_steps: 100
-ft_denoising_steps: 10
+ft_denoising_steps: 50
 cond_steps: 2
 img_cond_steps: 2
 critic_img_cond_steps: 1
@@ -79,8 +79,8 @@ env:
   best_reward_threshold_for_success: 0.405
   max_episode_steps: 200
   save_video: false
-  save_meshcat: false
-  meshcat_save_freq: 2  # Save meshcats every X iterations (like render.freq)
+  save_meshcat: true
+  meshcat_save_freq: 1  # Save meshcats every X iterations (like render.freq)
   approx_n_meshcats_saved: 5
   reinit_freq: 1  # Reinitialize environments every N iterations to reclaim leaked memory (0 to disable)
   specific:
@@ -123,7 +123,7 @@ shape_meta:
     state:
       shape: [6]
     full_state:
-      shape: [18]
+      shape: [19]
   action:
     shape: [5]
 
@@ -133,17 +133,17 @@ shape_meta:
 #       while the randomly-initialized critic learns initial value estimates
 #==============================================================================
 train:
-  n_train_itr: 200
+  n_train_itr: 500
   n_critic_warmup_itr: 2
   n_steps: 180
   gamma: 0.999
   augment: false
-  grad_accumulate: 20
+  grad_accumulate: 100
   actor_lr: 1e-5
   actor_weight_decay: 0
   actor_lr_scheduler:
     first_cycle_steps: ${train.n_train_itr}
-    warmup_steps: 5
+    warmup_steps: 10
     min_lr: 1e-5
   critic_lr: 1e-3
   critic_weight_decay: 0
@@ -151,7 +151,7 @@ train:
     first_cycle_steps: ${train.n_train_itr}
     warmup_steps: 10
     min_lr: 1e-3
-  save_model_freq: 50
+  save_model_freq: 10
   val_freq: 10
   render:
     freq: 10
@@ -159,8 +159,8 @@ train:
   reward_scale_running: true
   reward_scale_const: 1.0
   gae_lambda: 0.95
-  batch_size: 500
-  logprob_batch_size: 1000
+  batch_size: 100
+  logprob_batch_size: 200
   update_epochs: 10
   vf_coef: 0.5
   target_kl: 1.0
