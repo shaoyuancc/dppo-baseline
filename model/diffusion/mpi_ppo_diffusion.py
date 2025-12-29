@@ -363,7 +363,9 @@ class MPIPPODiffusion(nn.Module):
                     log.info("Set policy normalizer on fresh MPI critic for observation normalization")
                 
                 # Wrap fresh critic for DPPO interface
-                wrapped_critic = MPICriticWrapperFresh(fresh_critic)
+                # state_dim=obs_dim tells wrapper to normalize only the first obs_dim dims
+                # (the normalizer expects original state shape, not state+time)
+                wrapped_critic = MPICriticWrapperFresh(fresh_critic, state_dim=obs_dim)
             
             elif critic_type == 'mlp':
                 # MLP state-based critic (CriticObs) - no wrapper needed

@@ -187,21 +187,23 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         """
         Preprocess observations for critic based on critic_type.
         
-        For 'mpi' and 'vit' critics: extracts latest frame(s) from rgb and state.
-        For 'mlp' critic: extracts full_state for asymmetric actor-critic setup.
+        For 'mpi' and 'vit' critics: extracts latest frame(s) from rgb and state,
+            and concatenates normalized time to state for value prediction.
+        For 'mlp' critic: extracts full_state for asymmetric actor-critic setup
+            (full_state already includes time).
         
         Args:
             obs: Dict with 'rgb' [B, T, C, H, W], 'state' [B, T, D], 
-                 and optionally 'full_state' [B, T, D_full]
+                 'time' [B, T, 1] or [B, 1], and optionally 'full_state' [B, T, D_full]
             
         Returns:
-            For mpi/vit: Dict with 'rgb' and 'state' (latest frames)
+            For mpi/vit: Dict with 'rgb' and 'state' (state includes time)
             For mlp: Dict with 'state' key containing full_state (for CriticObs)
         """
         import torch
         
         if self.critic_type == 'mlp':
-            # MLP critic uses full_state (privileged information)
+            # MLP critic uses full_state (privileged information, already includes time)
             # CriticObs expects {'state': [B, D]} where D is full_state_dim
             full_state = obs['full_state']
             if isinstance(full_state, torch.Tensor) and full_state.dim() == 3:
@@ -209,7 +211,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 full_state = full_state[:, -1]
             return {'state': full_state}
         
-        # mpi/vit critics use rgb + state
+        # mpi/vit critics use rgb + state + time
         critic_obs = {}
         
         # Extract latest frames for rgb
@@ -221,14 +223,28 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             else:
                 critic_obs['rgb'] = rgb
         
-        # Extract latest state observations
+        # Extract latest state observations and concatenate time
         if 'state' in obs:
             state = obs['state']
             if isinstance(state, torch.Tensor) and state.dim() == 3:
                 # [B, T, D] - take latest critic_n_obs_steps
-                critic_obs['state'] = state[:, -self.critic_n_obs_steps:]
-            else:
-                critic_obs['state'] = state
+                state = state[:, -self.critic_n_obs_steps:]
+            
+            # Concatenate normalized time to state for value prediction
+            # Time is critical for critics to predict value near episode boundaries
+            if 'time' in obs:
+                time = obs['time']
+                if isinstance(time, torch.Tensor):
+                    if time.dim() == 2:
+                        # [B, 1] -> expand to match state's time dimension [B, T, 1]
+                        time = time.unsqueeze(1).expand(-1, state.shape[1], -1)
+                    elif time.dim() == 3:
+                        # [B, T, 1] - take latest critic_n_obs_steps
+                        time = time[:, -self.critic_n_obs_steps:]
+                    # Concatenate time to state: [B, T, D] + [B, T, 1] -> [B, T, D+1]
+                    state = torch.cat([state, time], dim=-1)
+            
+            critic_obs['state'] = state
                 
         return critic_obs
     

@@ -126,7 +126,9 @@ shape_meta:
     state:
       shape: [6]
     full_state:
-      shape: [19]
+      shape: [20]  # 19 + 1 for normalized time
+    time:
+      shape: [1]   # Normalized timestep for critic (actor doesn't use this)
   action:
     shape: [5]
 
@@ -181,17 +183,19 @@ model:
   use_pretrained_critic: false
   critic_type: mpi # mpi or mlp or vit
   critic:
-    # MLP FULL STATE VALUE NETWORK
+    # MLP FULL STATE VALUE NETWORK (uses full_state which includes time)
     # _target_: model.common.critic.CriticObs
-    # cond_dim: 19
+    # cond_dim: 20  # full_state_dim + 1 for time
     # mlp_dims: [256, 256, 256]
     # activation_type: Mish
     # residual_style: true
 
     # RESNET18 VALUE NETWORK
+    # state_dim: 7 = original state (6) + time (1)
+    # The agent's _preprocess_obs_for_critic() concatenates time to state for value prediction
     _target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork
     img_shape: [1, 71, 192]
-    state_dim: 6
+    state_dim: 7  # 6 (robot state) + 1 (normalized time) for value prediction
     features_dim: 512
     use_tanh: false  # <-- IMPORTANT: Disable Tanh for PPO (need unbounded values)
     
@@ -216,8 +220,8 @@ model:
     # mlp_dims: [256, 256, 256]
     # activation_type: Mish
     # residual_style: true
-    # # cond_dim = state_dim * critic_n_obs_steps
-    # cond_dim: ${eval:'${obs_dim} * ${critic_n_obs_steps}'}
+    # # cond_dim = (state_dim + 1) * critic_n_obs_steps (includes time for value prediction)
+    # cond_dim: ${eval:'(${obs_dim} + 1) * ${critic_n_obs_steps}'}
     # augment: false  # REQUIRED: Non-square images break RandomShiftsAug
   
   # Model architecture params

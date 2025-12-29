@@ -128,7 +128,9 @@ shape_meta:
     state:
       shape: [6]
     full_state:
-      shape: [19]
+      shape: [20]  # 19 + 1 for normalized time
+    time:
+      shape: [1]   # Normalized timestep for critic (actor doesn't use this)
   action:
     shape: [5]
 
@@ -181,9 +183,11 @@ model:
   use_pretrained_critic: false
   critic_type: mpi
   critic:
+    # state_dim: 7 = original state (6) + time (1)
+    # The agent's _preprocess_obs_for_critic() concatenates time to state for value prediction
     _target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork
     img_shape: [1, 71, 192]
-    state_dim: 6
+    state_dim: 7  # 6 (robot state) + 1 (normalized time) for value prediction
     features_dim: 512
     use_tanh: false
   

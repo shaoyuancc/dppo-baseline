@@ -229,6 +229,8 @@ class MPICriticWrapperFresh(nn.Module):
     Responsibilities:
     - Squeeze time dimension if observations are single-frame
     - Normalize observations using policy normalizer
+    - Handle asymmetric actor-critic: state may include extra dims (e.g., time)
+      that the normalizer wasn't trained on
     - Call forward() and return raw values
     
     Does NOT handle history extraction - that is done by the agent via
@@ -239,16 +241,19 @@ class MPICriticWrapperFresh(nn.Module):
     where value unnormalization is not needed.
     """
     
-    def __init__(self, mpi_value_network: nn.Module):
+    def __init__(self, mpi_value_network: nn.Module, state_dim: int = 6):
         """
         Args:
             mpi_value_network: Fresh MPI value network (e.g., ResNet18TVTruck2dValueNetwork)
                                Should already have normalizer set via set_normalizer()
+            state_dim: Dimension of the original state that the normalizer was trained on.
+                       Any extra dimensions (e.g., time) will be passed through unnormalized.
         """
         super().__init__()
         self.value_network = mpi_value_network
+        self.state_dim = state_dim
         
-        log.info("MPICriticWrapperFresh initialized (extraction handled by agent)")
+        log.info(f"MPICriticWrapperFresh initialized (state_dim={state_dim}, extraction handled by agent)")
     
     def forward(
         self,
@@ -261,7 +266,7 @@ class MPICriticWrapperFresh(nn.Module):
         Args:
             cond: Dict with PRE-EXTRACTED observations from agent:
                 - 'rgb': (B, critic_img_cond_steps, C, H, W) 
-                - 'state': (B, critic_n_obs_steps, D)
+                - 'state': (B, critic_n_obs_steps, D) where D may include extra dims like time
             no_augment: Whether to skip augmentation (passed for API compatibility)
         
         Returns:
@@ -285,14 +290,23 @@ class MPICriticWrapperFresh(nn.Module):
             # Multiple timesteps - flatten into features
             state = state.reshape(B, -1)
         
+        # Handle asymmetric actor-critic: state may include extra dims (e.g., time)
+        # that the normalizer wasn't trained on. Split, normalize, and concatenate.
+        state_for_norm = state[..., :self.state_dim]  # Original state dims
+        state_extra = state[..., self.state_dim:] if state.shape[-1] > self.state_dim else None
+        
         # Normalize inputs using the value network's normalizer (policy normalizer)
         if hasattr(self.value_network, 'normalizer'):
             data_n = self.value_network.normalizer.normalize({
                 'images': rgb,
-                'robot_state': state
+                'robot_state': state_for_norm
             })
             img_norm = data_n['images']
             vec_norm = data_n['robot_state']
+            
+            # Concatenate extra dims (already normalized, e.g., time is [0,1])
+            if state_extra is not None:
+                vec_norm = torch.cat([vec_norm, state_extra], dim=-1)
         else:
             # No normalizer - use raw inputs
             img_norm = rgb
@@ -315,6 +329,9 @@ class DPPOViTCriticWrapper(nn.Module):
     Does NOT handle history extraction - that is done by the agent via
     `_preprocess_obs_for_critic()`. This wrapper receives PRE-EXTRACTED observations.
     
+    Note: The agent's _preprocess_obs_for_critic() concatenates time to state,
+    so the ViTCritic must be configured with cond_dim that includes time.
+    
     Note: ViTCritic internally handles:
     - Channel concatenation: (B, T, C, H, W) -> (B, T*C, H, W) via einops
     - State flattening: (B, T, D) -> (B, T*D)
@@ -324,6 +341,8 @@ class DPPOViTCriticWrapper(nn.Module):
         """
         Args:
             vit_critic: DPPO's ViTCritic instance
+                        Should be configured with cond_dim that accounts for time
+                        (e.g., (obs_dim + 1) * critic_n_obs_steps)
         """
         super().__init__()
         self.vit_critic = vit_critic
@@ -337,12 +356,12 @@ class DPPOViTCriticWrapper(nn.Module):
         Args:
             cond: Dict with PRE-EXTRACTED observations from agent:
                 - 'rgb': (B, critic_img_cond_steps, C, H, W) in [0,1]
-                - 'state': (B, critic_n_obs_steps, D)
+                - 'state': (B, critic_n_obs_steps, D+1) where D+1 includes time
             no_augment: Whether to skip augmentation (default True for PPO)
                 
         Note: ViTCritic internally handles:
             - Channel concatenation: (B, T, C, H, W) -> (B, T*C, H, W)
-            - State flattening: (B, T, D) -> (B, T*D)
+            - State flattening: (B, T, D+1) -> (B, T*(D+1))
         
         Returns:
             values: [B, 1] value estimates
@@ -351,7 +370,7 @@ class DPPOViTCriticWrapper(nn.Module):
         # (VitEncoder.forward does: obs = obs / 255.0 - 0.5)
         critic_cond = {
             'rgb': cond['rgb'] * 255.0,
-            'state': cond['state'],
+            'state': cond['state'],  # Already includes time from agent preprocessing
         }
         
         return self.vit_critic(critic_cond, no_augment=no_augment)
