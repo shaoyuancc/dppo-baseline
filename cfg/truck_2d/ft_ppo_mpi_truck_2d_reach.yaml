@@ -39,7 +39,7 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: reach_ddim
+name: reach_ddim5_min_sampling_denoising_std1e-2
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-reach/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
@@ -64,7 +64,7 @@ env_name: truck_2d_reach
 obs_dim: 6
 action_dim: 5
 denoising_steps: 100
-ft_denoising_steps: 10
+ft_denoising_steps: 5
 cond_steps: 2
 img_cond_steps: 2
 critic_img_cond_steps: 1
@@ -79,7 +79,7 @@ use_ddim: true
 env:
   n_envs: 50
   name: ${env_name}
-  env_type: truck_2d_reach
+  env_type: ${env_name}
   best_reward_threshold_for_success: 0.405
   max_episode_steps: 50
   save_video: false
@@ -135,7 +135,7 @@ shape_meta:
 # Training Configuration
 #==============================================================================
 train:
-  n_train_itr: 500
+  n_train_itr: 200
   n_critic_warmup_itr: 2
   n_steps: 180
   gamma: 0.999
@@ -153,8 +153,8 @@ train:
     first_cycle_steps: ${train.n_train_itr}
     warmup_steps: 10
     min_lr: 1e-3
-  save_model_freq: 100
-  force_train: true
+  save_model_freq: 10
+  force_train: false
   val_freq: 10
   render:
     freq: 100
@@ -237,7 +237,7 @@ model:
   clip_ploss_coef_base: 0.001
   clip_ploss_coef_rate: 3
   norm_adv: true
-  min_sampling_denoising_std: 0.1
+  min_sampling_denoising_std: 0.01
   min_logprob_denoising_std: 0.1
   denoised_clip_value: 1.0
   randn_clip_value: 3
