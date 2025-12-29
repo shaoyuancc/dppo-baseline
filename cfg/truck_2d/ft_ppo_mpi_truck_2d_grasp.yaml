@@ -79,7 +79,7 @@ use_ddim: false
 env:
   n_envs: 50
   name: ${env_name}
-  env_type: truck_2d_reach
+  env_type: ${env_name}
   best_reward_threshold_for_success: 0.405
   max_episode_steps: 50
   save_video: false
