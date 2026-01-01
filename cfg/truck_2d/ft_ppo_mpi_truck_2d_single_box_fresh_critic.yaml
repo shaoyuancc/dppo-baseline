@@ -29,7 +29,7 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: single_box_ddpm50_min_sampling_denoising_std1e-2
+name: single_box_ddim5_dense_reward_v2_actor_lr1e-5
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-fresh/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
@@ -58,14 +58,14 @@ env_name: truck_2d
 obs_dim: 6
 action_dim: 5
 denoising_steps: 100
-ft_denoising_steps: 50
+ft_denoising_steps: 5
 cond_steps: 2
 img_cond_steps: 2
 critic_img_cond_steps: 1
 critic_n_obs_steps: 1
 horizon_steps: 32
 act_steps: 20
-use_ddim: false
+use_ddim: true
 
 #==============================================================================
 # Environment Configuration
@@ -80,7 +80,7 @@ env:
   max_episode_steps: 200
   save_video: false
   save_meshcat: true
-  meshcat_save_freq: 1  # Save meshcats every X iterations (like render.freq)
+  meshcat_save_freq: 5  # Save meshcats every X iterations (like render.freq)
   approx_n_meshcats_saved: 5
   reinit_freq: 1  # Reinitialize environments every N iterations to reclaim leaked memory (0 to disable)
   specific:
@@ -108,7 +108,9 @@ env:
       drop_reward: 2.0
       failed_drop_penalty: -2.0
       max_reward_distance: 3.0
-      dense_reward_scale: 0.08
+      dense_reward_scale: 0.05
+      # Binary: +reward if correct suction, -reward if wrong
+      maintain_grasp_reward: 0.02
   wrappers:
     multi_step:
       n_obs_steps: ${cond_steps}
@@ -133,12 +135,12 @@ shape_meta:
 #       while the randomly-initialized critic learns initial value estimates
 #==============================================================================
 train:
-  n_train_itr: 200
+  n_train_itr: 201
   n_critic_warmup_itr: 2
   n_steps: 180
   gamma: 0.999
   augment: false
-  grad_accumulate: 100
+  grad_accumulate: 20
   actor_lr: 1e-5
   actor_weight_decay: 0
   actor_lr_scheduler:
@@ -159,8 +161,8 @@ train:
   reward_scale_running: true
   reward_scale_const: 1.0
   gae_lambda: 0.95
-  batch_size: 100
-  logprob_batch_size: 200
+  batch_size: 500
+  logprob_batch_size: 1000
   update_epochs: 10
   vf_coef: 0.5
   target_kl: 1.0
@@ -203,7 +205,7 @@ model:
   clip_ploss_coef_rate: 3
   norm_adv: true
   min_sampling_denoising_std: 0.01
-  min_logprob_denoising_std: 0.1
+  min_logprob_denoising_std: 0.01
   denoised_clip_value: 1.0
   randn_clip_value: 3
 

@@ -45,13 +45,13 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         self.meshcat_dir = os.path.join(self.logdir, 'meshcats')
         if self.save_meshcat:
             os.makedirs(self.meshcat_dir, exist_ok=True)
-            log.info(f"Meshcat saving enabled: will save ~{self.approx_n_meshcats_saved} every {self.meshcat_save_freq} iterations to {self.meshcat_dir}")
+            log.info("Meshcat saving enabled: will save ~%d every %d iterations to %s", self.approx_n_meshcats_saved, self.meshcat_save_freq, self.meshcat_dir)
             
         # Get control_timestep from config for timeout duration calculation in metrics
         # This is used to compute the actual episode timeout duration in seconds
         env_specific = getattr(cfg.env, 'specific', {})
         self.control_timestep = env_specific.get('control_timestep', 0.1)
-        log.info(f"Control timestep for metrics: {self.control_timestep}s")
+        log.info("Control timestep for metrics: %ss", self.control_timestep)
             
         # Episode tracking for custom metrics
         self._episode_infos = []
@@ -66,14 +66,14 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         
         # Critic type: 'mpi', 'vit', or 'mlp' (for asymmetric actor-critic with full_state)
         self.critic_type = cfg.model.get('critic_type', 'mpi')
-        log.info(f"Critic type: {self.critic_type}")
-        log.info(f"Critic uses {self.critic_n_obs_steps} obs steps, {self.critic_img_cond_steps} img cond steps")
+        log.info("Critic type: %s", self.critic_type)
+        log.info("Critic uses %d obs steps, %d img cond steps", self.critic_n_obs_steps, self.critic_img_cond_steps)
         
         # Environment reinitialization frequency (to reclaim leaked Drake memory)
         # Set to 0 to disable, 1 to reinit every iteration, N to reinit every N iterations
         self.env_reinit_freq = cfg.env.get('reinit_freq', 0)
         if self.env_reinit_freq > 0:
-            log.info(f"Environment reinitialization enabled: every {self.env_reinit_freq} iteration(s)")
+            log.info("Environment reinitialization enabled: every %d iteration(s)", self.env_reinit_freq)
         
         # Validate that policy normalizer is loaded for action unnormalization
         if self.policy_normalizer is None:
@@ -86,8 +86,8 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             if hasattr(self.policy_normalizer, 'params_dict'):
                 if 'action' not in self.policy_normalizer.params_dict:
                     log.warning(
-                        f"Policy normalizer does not have 'action' key! "
-                        f"Available keys: {list(self.policy_normalizer.params_dict.keys())}"
+                        "Policy normalizer does not have 'action' key! Available keys: %s",
+                        list(self.policy_normalizer.params_dict.keys())
                     )
                 else:
                     # Log the action normalizer stats for debugging
@@ -95,9 +95,9 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     if 'input_stats' in action_params:
                         stats = action_params['input_stats']
                         log.info(
-                            f"Action normalizer stats: "
-                            f"min={stats['min'].cpu().numpy()}, "
-                            f"max={stats['max'].cpu().numpy()}"
+                            "Action normalizer stats: min=%s, max=%s",
+                            stats['min'].cpu().numpy(),
+                            stats['max'].cpu().numpy()
                         )
     
     def _save_debug_images(self, rgb: torch.Tensor, itr: int, step: int):
@@ -117,8 +117,11 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         debug_dir = os.path.join(self.logdir, 'debug_images')
         os.makedirs(debug_dir, exist_ok=True)
         
-        # Convert to numpy
-        rgb_np = rgb.cpu().numpy()  # [B, T, C, H, W]
+        # Convert to numpy if it's a tensor, otherwise use as-is
+        if hasattr(rgb, 'cpu'):
+            rgb_np = rgb.cpu().numpy()  # [B, T, C, H, W]
+        else:
+            rgb_np = rgb  # Already numpy array
         
         # Save images for each environment and timestep
         n_envs = min(rgb_np.shape[0], 3)  # Save at most 3 environments
@@ -137,10 +140,8 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 filepath = os.path.join(debug_dir, filename)
                 Image.fromarray(img_uint8, mode='L').save(filepath)
         
-        log.info(f"[DEBUG] Saved {n_envs * n_timesteps} debug images to {debug_dir}")
-    
-    
-    
+        log.info("[DEBUG] Saved %d debug images to %s", n_envs * n_timesteps, debug_dir)
+
     def _unnormalize_actions(self, actions: np.ndarray) -> np.ndarray:
         """
         Unnormalize actions using the MPI policy normalizer.
@@ -173,9 +174,9 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             unnormalized = self.policy_normalizer.unnormalize({'action': actions_flat})
             unnormalized_actions = unnormalized['action']
         except Exception as e:
-            log.error(f"Failed to unnormalize actions: {e}")
-            log.error(f"Actions shape: {actions_flat.shape}")
-            log.error(f"Normalizer keys: {list(self.policy_normalizer.params_dict.keys()) if hasattr(self.policy_normalizer, 'params_dict') else 'unknown'}")
+            log.error("Failed to unnormalize actions: %s", e)
+            log.error("Actions shape: %s", actions_flat.shape)
+            log.error("Normalizer keys: %s", list(self.policy_normalizer.params_dict.keys()) if hasattr(self.policy_normalizer, 'params_dict') else 'unknown')
             raise
         
         # Reshape back to original shape
@@ -268,24 +269,33 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             n_boxes_removed = int(get_latest(info.get('n_boxes_removed'), 0))
             n_boxes_total = int(get_latest(info.get('n_boxes_total'), 0))
             
+            # Grasp/drop statistics
+            n_successful_grasps = int(get_latest(info.get('n_successful_grasps'), 0))
+            n_failed_grasps = int(get_latest(info.get('n_failed_grasps'), 0))
+            n_failed_drops = int(get_latest(info.get('n_failed_drops'), 0))
+            
             # Check if this is a truck unloading task (has box metrics)
             has_truck_metrics = n_boxes_total > 0
             
             # Debug log for every step to trace environment flow
             if has_truck_metrics:
                 log.debug(
-                    f"[Env {env_idx}] Step {step}: status={status}, "
-                    f"n_boxes_removed={n_boxes_removed}/{n_boxes_total}, "
-                    f"duration={duration:.2f}s"
+                    "[Env %d] Step %d: status=%s, n_boxes_removed=%d/%d, duration=%.2fs",
+                    env_idx, step, status, n_boxes_removed, n_boxes_total, duration
                 )
             else:
                 # Reach task - log distance if available
                 distance = get_latest(info.get('distance_to_box'), None)
-                dist_str = f", distance={distance:.4f}m" if distance is not None else ""
-                log.debug(
-                    f"[Env {env_idx}] Step {step}: status={status}, "
-                    f"duration={duration:.2f}s{dist_str}"
-                )
+                if distance is not None:
+                    log.debug(
+                        "[Env %d] Step %d: status=%s, duration=%.2fs, distance=%.4fm",
+                        env_idx, step, status, duration, distance
+                    )
+                else:
+                    log.debug(
+                        "[Env %d] Step %d: status=%s, duration=%.2fs",
+                        env_idx, step, status, duration
+                    )
             
             # Only record episode info when the episode actually ended
             if episode_ended:
@@ -297,6 +307,10 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     'is_success': is_success,
                     'status': status,
                     'step': step,
+                    # Grasp/drop statistics
+                    'n_successful_grasps': n_successful_grasps,
+                    'n_failed_grasps': n_failed_grasps,
+                    'n_failed_drops': n_failed_drops,
                 }
                 
                 # Only include truck-specific fields if they exist
@@ -308,14 +322,13 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 
                 if has_truck_metrics:
                     log.debug(
-                        f"[Env {env_idx}] Episode ended at step {step}: "
-                        f"status={status}, boxes_removed={n_boxes_removed}/{n_boxes_total}, "
-                        f"duration={duration:.2f}s, success={is_success}"
+                        "[Env %d] Episode ended at step %d: status=%s, boxes_removed=%d/%d, duration=%.2fs, success=%s",
+                        env_idx, step, status, n_boxes_removed, n_boxes_total, duration, is_success
                     )
                 else:
                     log.debug(
-                        f"[Env {env_idx}] Episode ended at step {step}: "
-                        f"status={status}, duration={duration:.2f}s, success={is_success}"
+                        "[Env %d] Episode ended at step %d: status=%s, duration=%.2fs, success=%s",
+                        env_idx, step, status, duration, is_success
                     )
         
     def _aggregate_custom_metrics(self, timeout_duration: float = 100.0):
@@ -324,9 +337,9 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         
         For truck unloading task: computes PPH, task_completion, success_rate
         For reach task (no n_boxes_total): only computes success_rate
-        Both tasks: computes avg_success_duration, avg_fail_duration
+        Both tasks: computes avg_success_duration, avg_fail_duration, grasp/drop stats
         """
-        log.debug(f"Aggregating metrics from {len(self._episode_infos)} episodes")
+        log.debug("Aggregating metrics from %d episodes", len(self._episode_infos))
         
         if not self._episode_infos:
             log.debug("No episodes completed this iteration")
@@ -338,6 +351,9 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 'avg_success_duration': 0.0,
                 'avg_fail_duration': 0.0,
                 'has_truck_metrics': False,
+                'avg_successful_grasps': 0.0,
+                'avg_failed_grasps': 0.0,
+                'avg_failed_drops': 0.0,
             }
         
         # Count status types for summary
@@ -347,6 +363,11 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         n_success = 0
         success_durations = []
         fail_durations = []
+        
+        # Grasp/drop stats
+        successful_grasps = []
+        failed_grasps = []
+        failed_drops = []
         
         for ep_info in self._episode_infos:
             is_success = ep_info.get('is_success', False)
@@ -362,6 +383,11 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 success_durations.append(duration)
             else:
                 fail_durations.append(duration)
+            
+            # Collect grasp/drop stats
+            successful_grasps.append(ep_info.get('n_successful_grasps', 0))
+            failed_grasps.append(ep_info.get('n_failed_grasps', 0))
+            failed_drops.append(ep_info.get('n_failed_drops', 0))
             
             # Only compute PPH and task_completion for truck unloading task
             # (reach task doesn't have n_boxes_total in ep_info)
@@ -394,17 +420,23 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             'avg_success_duration': float(np.mean(success_durations)) if success_durations else 0.0,
             'avg_fail_duration': float(np.mean(fail_durations)) if fail_durations else 0.0,
             'has_truck_metrics': has_truck_metrics,
+            # Grasp/drop averages
+            'avg_successful_grasps': float(np.mean(successful_grasps)) if successful_grasps else 0.0,
+            'avg_failed_grasps': float(np.mean(failed_grasps)) if failed_grasps else 0.0,
+            'avg_failed_drops': float(np.mean(failed_drops)) if failed_drops else 0.0,
         }
         
         # Log iteration summary
         log.info(
-            f"Iteration summary: {len(self._episode_infos)} episodes completed, "
-            f"status breakdown: {status_counts}"
+            "Iteration summary: %d episodes completed, status breakdown: %s",
+            len(self._episode_infos),
+            status_counts
         )
         log.debug(
-            f"Metrics: PPH={metrics['avg_pieces_per_hour']:.2f}, "
-            f"task_completion={metrics['avg_task_completion']:.4f}, "
-            f"success_rate={metrics['custom_success_rate']:.4f}"
+            "Metrics: PPH=%.2f, task_completion=%.4f, success_rate=%.4f",
+            metrics['avg_pieces_per_hour'],
+            metrics['avg_task_completion'],
+            metrics['custom_success_rate']
         )
         
         # Clear episode infos for next iteration
@@ -436,7 +468,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             self._episode_infos = []
             self._episodes_this_iteration = 0
             
-            log.debug(f"=== Starting iteration {self.itr}/{self.n_train_itr} ===")
+            log.debug("=== Starting iteration %d/%d ===", self.itr, self.n_train_itr)
 
             # Define train or eval (computed early for meshcat naming)
             eval_mode = self.itr % self.val_freq == 0 and not self.force_train
@@ -463,21 +495,21 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                         self.meshcat_dir, f"itr-{self.itr}_{mode_str}_env-{env_ind}.html"
                     )
                     options_venv[env_ind]["meshcat_path"] = meshcat_path
-                    log.debug(f"Meshcat enabled for env {env_ind}: {meshcat_path}")
+                    log.debug("Meshcat enabled for env %d: %s", env_ind, meshcat_path)
 
             self.model.eval() if eval_mode else self.model.train()
             last_itr_eval = eval_mode
             
-            log.debug(f"Iteration {self.itr}: eval_mode={eval_mode}, n_envs={self.n_envs}, n_steps={self.n_steps}")
+            log.debug("Iteration %d: eval_mode=%s, n_envs=%d, n_steps=%d", self.itr, eval_mode, self.n_envs, self.n_steps)
 
             # Reset env before iteration
             firsts_trajs = np.zeros((self.n_steps + 1, self.n_envs))
             if self.reset_at_iteration or eval_mode or last_itr_eval:
-                log.debug(f"Resetting all {self.n_envs} environments for iteration {self.itr}")
+                log.debug("Resetting all %d environments for iteration %d", self.n_envs, self.itr)
                 prev_obs_venv = self.reset_env_all(options_venv=options_venv)
                 firsts_trajs[0] = 1
             else:
-                log.debug(f"Continuing from previous state, done_venv={done_venv}")
+                log.debug("Continuing from previous state, done_venv=%s", done_venv)
                 firsts_trajs[0] = done_venv
 
             # Holders
@@ -505,7 +537,8 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             # Collect trajectories
             for step in range(self.n_steps):
                 if step % 10 == 0:
-                    log.info(f"Processed step {step} of {self.n_steps}")
+                    log.info("Processed step %d of %d", step, self.n_steps)
+                    
 
                 # Select action
                 with torch.no_grad():
@@ -542,9 +575,10 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 
                 # Debug log for environment step results
                 log.debug(
-                    f"Agent Step {step}: rewards={reward_venv}, terminated={terminated_venv}, "
-                    f"truncated={truncated_venv}"
+                    "Agent Step %d: rewards=%s, terminated=%s, truncated=%s",
+                    step, reward_venv, terminated_venv, truncated_venv
                 )
+                # self._save_debug_images(obs_venv["rgb"], self.itr, step)
 
                 
                 # Track custom metrics from info (only for episodes that ended)
@@ -835,9 +869,8 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 advantages_mean = float(advantages_k.mean().cpu().numpy())
                 advantages_std = float(advantages_k.std().cpu().numpy())
                 log.info(
-                    f"[Critic Diagnostics] Returns: mean={returns_mean:.4f}, std={returns_std:.4f} | "
-                    f"Values: mean={values_mean:.4f}, std={values_std:.4f} | "
-                    f"Advantages: mean={advantages_mean:.4f}, std={advantages_std:.4f}"
+                    "[Critic Diagnostics] Returns: mean=%.4f, std=%.4f | Values: mean=%.4f, std=%.4f | Advantages: mean=%.4f, std=%.4f",
+                    returns_mean, returns_std, values_mean, values_std, advantages_mean, advantages_std
                 )
 
             # Update lr
@@ -866,10 +899,12 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 run_results[-1]["time"] = time
                 if eval_mode:
                     log.info(
-                        f"eval: success rate {success_rate:8.4f} | avg episode reward {avg_episode_reward:8.4f} | avg best reward {avg_best_reward:8.4f}"
+                        "eval: success rate %8.4f | avg episode reward %8.4f | avg best reward %8.4f",
+                        success_rate, avg_episode_reward, avg_best_reward
                     )
                     log.info(
-                        f"      PPH {custom_metrics['avg_pieces_per_hour']:8.2f} | task_completion {custom_metrics['avg_task_completion']:8.4f}"
+                        "      PPH %8.2f | task_completion %8.4f",
+                        custom_metrics['avg_pieces_per_hour'], custom_metrics['avg_task_completion']
                     )
                     if self.use_wandb:
                         eval_wandb_metrics = {
@@ -882,6 +917,10 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                             "n_episodes_completed - eval": custom_metrics['n_episodes_completed'],
                             "avg_success_duration - eval": custom_metrics['avg_success_duration'],
                             "avg_fail_duration - eval": custom_metrics['avg_fail_duration'],
+                            # Grasp/drop averages
+                            "avg_successful_grasps - eval": custom_metrics['avg_successful_grasps'],
+                            "avg_failed_grasps - eval": custom_metrics['avg_failed_grasps'],
+                            "avg_failed_drops - eval": custom_metrics['avg_failed_drops'],
                         }
                         # Only log truck-specific metrics for truck unloading task
                         if custom_metrics['has_truck_metrics']:
@@ -895,15 +934,20 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     run_results[-1]["eval_avg_fail_duration"] = custom_metrics['avg_fail_duration']
                 else:
                     log.info(
-                        f"{self.itr}: step {cnt_train_step:8d} | loss {loss:8.4f} | pg loss {pg_loss:8.4f} | value loss {v_loss:8.4f} | bc loss {bc_loss:8.4f} | reward {avg_episode_reward:8.4f} | eta {eta:8.4f} | t:{time:8.4f}"
+                        "%d: step %8d | loss %8.4f | pg loss %8.4f | value loss %8.4f | bc loss %8.4f | reward %8.4f | eta %8.4f | t:%8.4f",
+                        self.itr, cnt_train_step, loss, pg_loss, v_loss, bc_loss, avg_episode_reward, eta, time
                     )
                     if custom_metrics['has_truck_metrics']:
                         log.info(
-                            f"      PPH {custom_metrics['avg_pieces_per_hour']:8.2f} | task_completion {custom_metrics['avg_task_completion']:8.4f} | success_dur {custom_metrics['avg_success_duration']:6.2f}s | fail_dur {custom_metrics['avg_fail_duration']:6.2f}s"
+                            "      PPH %8.2f | task_completion %8.4f | success_dur %6.2fs | fail_dur %6.2fs",
+                            custom_metrics['avg_pieces_per_hour'], custom_metrics['avg_task_completion'],
+                            custom_metrics['avg_success_duration'], custom_metrics['avg_fail_duration']
                         )
                     else:
                         log.info(
-                            f"      success_rate {custom_metrics['custom_success_rate']:8.4f} | success_dur {custom_metrics['avg_success_duration']:6.2f}s | fail_dur {custom_metrics['avg_fail_duration']:6.2f}s"
+                            "      success_rate %8.4f | success_dur %6.2fs | fail_dur %6.2fs",
+                            custom_metrics['custom_success_rate'],
+                            custom_metrics['avg_success_duration'], custom_metrics['avg_fail_duration']
                         )
                     if self.use_wandb:
                         train_wandb_metrics = {
@@ -927,6 +971,10 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                             "n_episodes_completed - train": custom_metrics['n_episodes_completed'],
                             "avg_success_duration - train": custom_metrics['avg_success_duration'],
                             "avg_fail_duration - train": custom_metrics['avg_fail_duration'],
+                            # Grasp/drop averages
+                            "avg_successful_grasps - train": custom_metrics['avg_successful_grasps'],
+                            "avg_failed_grasps - train": custom_metrics['avg_failed_grasps'],
+                            "avg_failed_drops - train": custom_metrics['avg_failed_drops'],
                             # Critic diagnostic metrics (for debugging value collapse)
                             "critic/returns_mean": returns_mean,
                             "critic/returns_std": returns_std,
