@@ -88,7 +88,6 @@ env:
     max_penetration_distance: 0.1
     full_trajectory_mode: false
     act_steps: ${act_steps}
-    normalize_actions: false 
     reward_config:
       step_reward: -0.1
       failure_reward: -20.0

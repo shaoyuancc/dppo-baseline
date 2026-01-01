@@ -16,7 +16,6 @@ _TRUCK_2D_ENV_KWARGS = [
     'enable_penetration_failure', 'init_x',
     'reward_config',  # Reward configuration dict
     'max_boxes',  # Limit number of boxes per problem
-    'normalize_actions',  # Whether env expects normalized actions
     'full_trajectory_mode',  # Use full trajectory execution like MPI
     'act_steps',  # Number of steps to execute in full trajectory mode
 ]

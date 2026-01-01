@@ -13,68 +13,88 @@ For MPI model integration, use config with:
       ...
 """
 
+import logging
+import math
 import os
+import pickle
+
+import einops
 import numpy as np
 import torch
-import logging
+
 import wandb
+from agent.finetune.train_ppo_diffusion_img_agent import TrainPPOImgDiffusionAgent
+from util.timer import Timer
 
 log = logging.getLogger(__name__)
-from agent.finetune.train_ppo_diffusion_img_agent import TrainPPOImgDiffusionAgent
 
 
 class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
     """
     DPPO agent specialized for truck_2d task with custom metrics.
-    
+
     The model is created via hydra config. For MPI models, use:
         model._target_: model.diffusion.mpi_ppo_diffusion.MPIPPODiffusion.from_mpi_checkpoints
-    
-    CRITICAL: This agent handles action unnormalization using the MPI LinearNormalizer.
-    The environment must have normalize_actions=False since we unnormalize here.
+
+    This agent handles action unnormalization using the MPI LinearNormalizer.
+    The environment expects raw (unnormalized) joint positions as input.
     """
 
     def __init__(self, cfg):
         # Call parent __init__ (creates environment, model via hydra, etc.)
         super().__init__(cfg)
-        
+
         # Truck_2d specific config
-        self.save_meshcat = getattr(cfg.env, 'save_meshcat', False)
-        self.meshcat_save_freq = getattr(cfg.env, 'meshcat_save_freq', 1)  # Default: every iteration
-        self.approx_n_meshcats_saved = getattr(cfg.env, 'approx_n_meshcats_saved', 0)
-        self.meshcat_dir = os.path.join(self.logdir, 'meshcats')
+        self.save_meshcat = getattr(cfg.env, "save_meshcat", False)
+        self.meshcat_save_freq = getattr(
+            cfg.env, "meshcat_save_freq", 1
+        )  # Default: every iteration
+        self.approx_n_meshcats_saved = getattr(cfg.env, "approx_n_meshcats_saved", 0)
+        self.meshcat_dir = os.path.join(self.logdir, "meshcats")
         if self.save_meshcat:
             os.makedirs(self.meshcat_dir, exist_ok=True)
-            log.info("Meshcat saving enabled: will save ~%d every %d iterations to %s", self.approx_n_meshcats_saved, self.meshcat_save_freq, self.meshcat_dir)
-            
+            log.info(
+                "Meshcat saving enabled: will save ~%d every %d iterations to %s",
+                self.approx_n_meshcats_saved,
+                self.meshcat_save_freq,
+                self.meshcat_dir,
+            )
+
         # Get control_timestep from config for timeout duration calculation in metrics
         # This is used to compute the actual episode timeout duration in seconds
-        env_specific = getattr(cfg.env, 'specific', {})
-        self.control_timestep = env_specific.get('control_timestep', 0.1)
+        env_specific = getattr(cfg.env, "specific", {})
+        self.control_timestep = env_specific.get("control_timestep", 0.1)
         log.info("Control timestep for metrics: %ss", self.control_timestep)
-            
+
         # Episode tracking for custom metrics
         self._episode_infos = []
         # Counter for meshcat saving
         self._meshcat_save_count = 0
         self._episodes_this_iteration = 0
-        
+
         # Critic observation preprocessing settings
         # Allows critic to use fewer observation steps than policy (e.g., single-frame)
-        self.critic_n_obs_steps = cfg.get('critic_n_obs_steps', self.n_cond_step)
-        self.critic_img_cond_steps = cfg.get('critic_img_cond_steps', self.n_cond_step)
-        
+        self.critic_n_obs_steps = cfg.get("critic_n_obs_steps", self.n_cond_step)
+        self.critic_img_cond_steps = cfg.get("critic_img_cond_steps", self.n_cond_step)
+
         # Critic type: 'mpi', 'vit', or 'mlp' (for asymmetric actor-critic with full_state)
-        self.critic_type = cfg.model.get('critic_type', 'mpi')
+        self.critic_type = cfg.model.get("critic_type", "mpi")
         log.info("Critic type: %s", self.critic_type)
-        log.info("Critic uses %d obs steps, %d img cond steps", self.critic_n_obs_steps, self.critic_img_cond_steps)
-        
+        log.info(
+            "Critic uses %d obs steps, %d img cond steps",
+            self.critic_n_obs_steps,
+            self.critic_img_cond_steps,
+        )
+
         # Environment reinitialization frequency (to reclaim leaked Drake memory)
         # Set to 0 to disable, 1 to reinit every iteration, N to reinit every N iterations
-        self.env_reinit_freq = cfg.env.get('reinit_freq', 0)
+        self.env_reinit_freq = cfg.env.get("reinit_freq", 0)
         if self.env_reinit_freq > 0:
-            log.info("Environment reinitialization enabled: every %d iteration(s)", self.env_reinit_freq)
-        
+            log.info(
+                "Environment reinitialization enabled: every %d iteration(s)",
+                self.env_reinit_freq,
+            )
+
         # Validate that policy normalizer is loaded for action unnormalization
         if self.policy_normalizer is None:
             log.warning(
@@ -83,279 +103,309 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             )
         else:
             # Check that the normalizer has an 'action' key
-            if hasattr(self.policy_normalizer, 'params_dict'):
-                if 'action' not in self.policy_normalizer.params_dict:
+            if hasattr(self.policy_normalizer, "params_dict"):
+                if "action" not in self.policy_normalizer.params_dict:
                     log.warning(
                         "Policy normalizer does not have 'action' key! Available keys: %s",
-                        list(self.policy_normalizer.params_dict.keys())
+                        list(self.policy_normalizer.params_dict.keys()),
                     )
                 else:
                     # Log the action normalizer stats for debugging
-                    action_params = self.policy_normalizer.params_dict['action']
-                    if 'input_stats' in action_params:
-                        stats = action_params['input_stats']
+                    action_params = self.policy_normalizer.params_dict["action"]
+                    if "input_stats" in action_params:
+                        stats = action_params["input_stats"]
                         log.info(
                             "Action normalizer stats: min=%s, max=%s",
-                            stats['min'].cpu().numpy(),
-                            stats['max'].cpu().numpy()
+                            stats["min"].cpu().numpy(),
+                            stats["max"].cpu().numpy(),
                         )
-    
+
     def _save_debug_images(self, rgb: torch.Tensor, itr: int, step: int):
         """
         Save depth images to disk for visual inspection.
-        
+
         Args:
             rgb: Tensor of shape [B, T, C, H, W] containing grayscale depth images
             itr: Current iteration number
             step: Current step number
         """
         import os
-        from PIL import Image
+
         import numpy as np
-        
+        from PIL import Image
+
         # Create debug images directory
-        debug_dir = os.path.join(self.logdir, 'debug_images')
+        debug_dir = os.path.join(self.logdir, "debug_images")
         os.makedirs(debug_dir, exist_ok=True)
-        
+
         # Convert to numpy if it's a tensor, otherwise use as-is
-        if hasattr(rgb, 'cpu'):
+        if hasattr(rgb, "cpu"):
             rgb_np = rgb.cpu().numpy()  # [B, T, C, H, W]
         else:
             rgb_np = rgb  # Already numpy array
-        
+
         # Save images for each environment and timestep
         n_envs = min(rgb_np.shape[0], 3)  # Save at most 3 environments
         n_timesteps = rgb_np.shape[1]
-        
+
         for env_idx in range(n_envs):
             for t_idx in range(n_timesteps):
                 # Extract single image [C, H, W] -> [H, W] for grayscale
                 img = rgb_np[env_idx, t_idx, 0]  # First channel (grayscale)
-                
+
                 # Convert to 8-bit for saving (0-255)
                 img_uint8 = (img * 255).astype(np.uint8)
-                
+
                 # Save as PNG
                 filename = f"itr{itr}_step{step}_env{env_idx}_t{t_idx}.png"
                 filepath = os.path.join(debug_dir, filename)
-                Image.fromarray(img_uint8, mode='L').save(filepath)
-        
+                Image.fromarray(img_uint8, mode="L").save(filepath)
+
         log.info("[DEBUG] Saved %d debug images to %s", n_envs * n_timesteps, debug_dir)
 
     def _unnormalize_actions(self, actions: np.ndarray) -> np.ndarray:
         """
         Unnormalize actions using the MPI policy normalizer.
-        
+
         The diffusion model outputs actions in normalized space (approximately [-1, 1]).
         This method converts them to actual joint positions using the learned
         normalizer from MPI pre-training.
-        
+
         Args:
             actions: Normalized actions from diffusion model, shape (n_envs, act_steps, action_dim)
                     or (n_envs, horizon_steps, action_dim)
-        
+
         Returns:
             Unnormalized actions (actual joint positions), same shape as input
         """
         if self.policy_normalizer is None:
-            log.warning("No policy normalizer - returning actions as-is (this will likely fail!)")
+            log.warning(
+                "No policy normalizer - returning actions as-is (this will likely fail!)"
+            )
             return actions
-        
+
         # Convert to torch tensor
         actions_tensor = torch.from_numpy(actions).float().to(self.device)
         original_shape = actions_tensor.shape
-        
-        # Flatten for normalization: (n_envs, act_steps, action_dim) -> (n_envs * act_steps, action_dim)
+
+        # Flatten for normalization:
+        # (n_envs, act_steps, action_dim) -> (n_envs * act_steps, action_dim)
         actions_flat = actions_tensor.reshape(-1, actions_tensor.shape[-1])
-        
+
         # Unnormalize using the policy normalizer's action key
         try:
             # Use the LinearNormalizer's unnormalize method with dict input
-            unnormalized = self.policy_normalizer.unnormalize({'action': actions_flat})
-            unnormalized_actions = unnormalized['action']
+            unnormalized = self.policy_normalizer.unnormalize({"action": actions_flat})
+            unnormalized_actions = unnormalized["action"]
         except Exception as e:
             log.error("Failed to unnormalize actions: %s", e)
             log.error("Actions shape: %s", actions_flat.shape)
-            log.error("Normalizer keys: %s", list(self.policy_normalizer.params_dict.keys()) if hasattr(self.policy_normalizer, 'params_dict') else 'unknown')
+            log.error(
+                "Normalizer keys: %s",
+                list(self.policy_normalizer.params_dict.keys())
+                if hasattr(self.policy_normalizer, "params_dict")
+                else "unknown",
+            )
             raise
-        
+
         # Reshape back to original shape
         unnormalized_actions = unnormalized_actions.reshape(original_shape)
-        
+
         return unnormalized_actions.cpu().numpy()
-    
+
     def _preprocess_obs_for_critic(self, obs):
         """
         Preprocess observations for critic based on critic_type.
-        
+
         For 'mpi' and 'vit' critics: extracts latest frame(s) from rgb and state.
         For 'mlp' critic: extracts full_state for asymmetric actor-critic setup.
-        
+
         Args:
-            obs: Dict with 'rgb' [B, T, C, H, W], 'state' [B, T, D], 
+            obs: Dict with 'rgb' [B, T, C, H, W], 'state' [B, T, D],
                  and optionally 'full_state' [B, T, D_full]
-            
+
         Returns:
             For mpi/vit: Dict with 'rgb' and 'state' (latest frames)
             For mlp: Dict with 'state' key containing full_state (for CriticObs)
         """
-        import torch
-        
-        if self.critic_type == 'mlp':
+        if self.critic_type == "mlp":
             # MLP critic uses full_state (privileged information)
             # CriticObs expects {'state': [B, D]} where D is full_state_dim
-            full_state = obs['full_state']
+            full_state = obs["full_state"]
             if isinstance(full_state, torch.Tensor) and full_state.dim() == 3:
                 # [B, T, D] - take latest step
                 full_state = full_state[:, -1]
-            return {'state': full_state}
-        
+            return {"state": full_state}
+
         # mpi/vit critics use rgb + state
         critic_obs = {}
-        
+
         # Extract latest frames for rgb
-        if 'rgb' in obs:
-            rgb = obs['rgb']
+        if "rgb" in obs:
+            rgb = obs["rgb"]
             if isinstance(rgb, torch.Tensor) and rgb.dim() == 5:
                 # [B, T, C, H, W] - take latest critic_img_cond_steps frames
-                critic_obs['rgb'] = rgb[:, -self.critic_img_cond_steps:]
+                critic_obs["rgb"] = rgb[:, -self.critic_img_cond_steps :]
             else:
-                critic_obs['rgb'] = rgb
-        
+                critic_obs["rgb"] = rgb
+
         # Extract latest state observations
-        if 'state' in obs:
-            state = obs['state']
+        if "state" in obs:
+            state = obs["state"]
             if isinstance(state, torch.Tensor) and state.dim() == 3:
                 # [B, T, D] - take latest critic_n_obs_steps
-                critic_obs['state'] = state[:, -self.critic_n_obs_steps:]
+                critic_obs["state"] = state[:, -self.critic_n_obs_steps :]
             else:
-                critic_obs['state'] = state
-                
+                critic_obs["state"] = state
+
         return critic_obs
-    
+
     def _compute_custom_metrics(self, info_venv, done_venv, step: int = -1):
         """
         Extract custom metrics from episode infos.
-        
+
         Calculates:
         - avg_pieces_per_hour: Average PPH across completed episodes (truck task only)
         - avg_task_completion: Average task completion ratio (truck task only)
         - custom_success_rate: Success rate based on is_success flag
-        
+
         For reach task (no n_boxes_total), PPH and task_completion are skipped.
-        
+
         Args:
             info_venv: List of info dicts from each environment
             done_venv: Boolean array indicating which environments finished an episode
             step: Current step within iteration (for debug logging)
         """
+
         def get_latest(value, default):
             """Extract the most recent value from potentially stacked info arrays."""
             if isinstance(value, np.ndarray):
                 return value.flat[-1]  # Last element, works for any shape
             return value if value is not None else default
-        
+
         # Collect all completed episode infos from this step
         for env_idx, info in enumerate(info_venv):
             episode_ended = bool(done_venv[env_idx])
-            
+
             # Extract the most recent values from info
             # (MultiStep wrapper stacks last n_obs_steps values into arrays)
-            status = str(get_latest(info.get('status'), 'unknown'))
-            duration = float(get_latest(info.get('duration'), 0.0))
-            is_success = bool(get_latest(info.get('is_success'), False))
-            
+            status = str(get_latest(info.get("status"), "unknown"))
+            duration = float(get_latest(info.get("duration"), 0.0))
+            is_success = bool(get_latest(info.get("is_success"), False))
+
             # Truck-specific fields (may not exist for reach task)
-            n_boxes_removed = int(get_latest(info.get('n_boxes_removed'), 0))
-            n_boxes_total = int(get_latest(info.get('n_boxes_total'), 0))
-            
+            n_boxes_removed = int(get_latest(info.get("n_boxes_removed"), 0))
+            n_boxes_total = int(get_latest(info.get("n_boxes_total"), 0))
+
             # Grasp/drop statistics
-            n_successful_grasps = int(get_latest(info.get('n_successful_grasps'), 0))
-            n_failed_grasps = int(get_latest(info.get('n_failed_grasps'), 0))
-            n_failed_drops = int(get_latest(info.get('n_failed_drops'), 0))
-            
+            n_successful_grasps = int(get_latest(info.get("n_successful_grasps"), 0))
+            n_failed_grasps = int(get_latest(info.get("n_failed_grasps"), 0))
+            n_failed_drops = int(get_latest(info.get("n_failed_drops"), 0))
+
             # Check if this is a truck unloading task (has box metrics)
             has_truck_metrics = n_boxes_total > 0
-            
+
             # Debug log for every step to trace environment flow
             if has_truck_metrics:
                 log.debug(
                     "[Env %d] Step %d: status=%s, n_boxes_removed=%d/%d, duration=%.2fs",
-                    env_idx, step, status, n_boxes_removed, n_boxes_total, duration
+                    env_idx,
+                    step,
+                    status,
+                    n_boxes_removed,
+                    n_boxes_total,
+                    duration,
                 )
             else:
                 # Reach task - log distance if available
-                distance = get_latest(info.get('distance_to_box'), None)
+                distance = get_latest(info.get("distance_to_box"), None)
                 if distance is not None:
                     log.debug(
                         "[Env %d] Step %d: status=%s, duration=%.2fs, distance=%.4fm",
-                        env_idx, step, status, duration, distance
+                        env_idx,
+                        step,
+                        status,
+                        duration,
+                        distance,
                     )
                 else:
                     log.debug(
                         "[Env %d] Step %d: status=%s, duration=%.2fs",
-                        env_idx, step, status, duration
+                        env_idx,
+                        step,
+                        status,
+                        duration,
                     )
-            
+
             # Only record episode info when the episode actually ended
             if episode_ended:
                 self._episodes_this_iteration += 1
-                
+
                 ep_info = {
-                    'env_idx': env_idx,
-                    'duration': duration,
-                    'is_success': is_success,
-                    'status': status,
-                    'step': step,
+                    "env_idx": env_idx,
+                    "duration": duration,
+                    "is_success": is_success,
+                    "status": status,
+                    "step": step,
                     # Grasp/drop statistics
-                    'n_successful_grasps': n_successful_grasps,
-                    'n_failed_grasps': n_failed_grasps,
-                    'n_failed_drops': n_failed_drops,
+                    "n_successful_grasps": n_successful_grasps,
+                    "n_failed_grasps": n_failed_grasps,
+                    "n_failed_drops": n_failed_drops,
                 }
-                
+
                 # Only include truck-specific fields if they exist
                 if has_truck_metrics:
-                    ep_info['n_boxes_total'] = n_boxes_total
-                    ep_info['n_boxes_removed'] = n_boxes_removed
-                
+                    ep_info["n_boxes_total"] = n_boxes_total
+                    ep_info["n_boxes_removed"] = n_boxes_removed
+
                 self._episode_infos.append(ep_info)
-                
+
                 if has_truck_metrics:
                     log.debug(
                         "[Env %d] Episode ended at step %d: status=%s, boxes_removed=%d/%d, duration=%.2fs, success=%s",
-                        env_idx, step, status, n_boxes_removed, n_boxes_total, duration, is_success
+                        env_idx,
+                        step,
+                        status,
+                        n_boxes_removed,
+                        n_boxes_total,
+                        duration,
+                        is_success,
                     )
                 else:
                     log.debug(
                         "[Env %d] Episode ended at step %d: status=%s, duration=%.2fs, success=%s",
-                        env_idx, step, status, duration, is_success
+                        env_idx,
+                        step,
+                        status,
+                        duration,
+                        is_success,
                     )
-        
+
     def _aggregate_custom_metrics(self, timeout_duration: float = 100.0):
         """
         Aggregate custom metrics from all completed episodes in this iteration.
-        
+
         For truck unloading task: computes PPH, task_completion, success_rate
         For reach task (no n_boxes_total): only computes success_rate
         Both tasks: computes avg_success_duration, avg_fail_duration, grasp/drop stats
         """
         log.debug("Aggregating metrics from %d episodes", len(self._episode_infos))
-        
+
         if not self._episode_infos:
             log.debug("No episodes completed this iteration")
             return {
-                'avg_pieces_per_hour': 0.0,
-                'avg_task_completion': 0.0,
-                'custom_success_rate': 0.0,
-                'n_episodes_completed': 0,
-                'avg_success_duration': 0.0,
-                'avg_fail_duration': 0.0,
-                'has_truck_metrics': False,
-                'avg_successful_grasps': 0.0,
-                'avg_failed_grasps': 0.0,
-                'avg_failed_drops': 0.0,
+                "avg_pieces_per_hour": 0.0,
+                "avg_task_completion": 0.0,
+                "custom_success_rate": 0.0,
+                "n_episodes_completed": 0,
+                "avg_success_duration": 0.0,
+                "avg_fail_duration": 0.0,
+                "has_truck_metrics": False,
+                "avg_successful_grasps": 0.0,
+                "avg_failed_grasps": 0.0,
+                "avg_failed_drops": 0.0,
             }
-        
+
         # Count status types for summary
         status_counts = {}
         pph_values = []
@@ -363,95 +413,99 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         n_success = 0
         success_durations = []
         fail_durations = []
-        
+
         # Grasp/drop stats
         successful_grasps = []
         failed_grasps = []
         failed_drops = []
-        
+
         for ep_info in self._episode_infos:
-            is_success = ep_info.get('is_success', False)
-            status = ep_info.get('status', 'unknown')
-            duration = ep_info.get('duration', 0.0)
-            
+            is_success = ep_info.get("is_success", False)
+            status = ep_info.get("status", "unknown")
+            duration = ep_info.get("duration", 0.0)
+
             # Count statuses
             status_counts[status] = status_counts.get(status, 0) + 1
-            
+
             # Count successes and track durations (works for any task type)
             if is_success:
                 n_success += 1
                 success_durations.append(duration)
             else:
                 fail_durations.append(duration)
-            
+
             # Collect grasp/drop stats
-            successful_grasps.append(ep_info.get('n_successful_grasps', 0))
-            failed_grasps.append(ep_info.get('n_failed_grasps', 0))
-            failed_drops.append(ep_info.get('n_failed_drops', 0))
-            
+            successful_grasps.append(ep_info.get("n_successful_grasps", 0))
+            failed_grasps.append(ep_info.get("n_failed_grasps", 0))
+            failed_drops.append(ep_info.get("n_failed_drops", 0))
+
             # Only compute PPH and task_completion for truck unloading task
             # (reach task doesn't have n_boxes_total in ep_info)
-            if 'n_boxes_total' in ep_info:
-                n_total = ep_info['n_boxes_total']
-                n_removed = ep_info.get('n_boxes_removed', 0)
-                
+            if "n_boxes_total" in ep_info:
+                n_total = ep_info["n_boxes_total"]
+                n_removed = ep_info.get("n_boxes_removed", 0)
+
                 # Task completion
                 if n_total > 0:
                     tc_values.append(n_removed / n_total)
-                
+
                 # PPH calculation
                 if is_success:
                     pph_duration = max(0.001, duration)
                 else:
                     pph_duration = timeout_duration
-                
+
                 if pph_duration > 0 and n_removed >= 0:
                     pph = (n_removed / pph_duration) * 3600  # pieces per hour
                     pph_values.append(pph)
-        
+
         # has_truck_metrics indicates whether PPH/task_completion are meaningful (truck unloading task)
         has_truck_metrics = len(pph_values) > 0 or len(tc_values) > 0
-        
+
         metrics = {
-            'avg_pieces_per_hour': float(np.mean(pph_values)) if pph_values else 0.0,
-            'avg_task_completion': float(np.mean(tc_values)) if tc_values else 0.0,
-            'custom_success_rate': n_success / len(self._episode_infos) if self._episode_infos else 0.0,
-            'n_episodes_completed': len(self._episode_infos),
-            'avg_success_duration': float(np.mean(success_durations)) if success_durations else 0.0,
-            'avg_fail_duration': float(np.mean(fail_durations)) if fail_durations else 0.0,
-            'has_truck_metrics': has_truck_metrics,
+            "avg_pieces_per_hour": float(np.mean(pph_values)) if pph_values else 0.0,
+            "avg_task_completion": float(np.mean(tc_values)) if tc_values else 0.0,
+            "custom_success_rate": n_success / len(self._episode_infos)
+            if self._episode_infos
+            else 0.0,
+            "n_episodes_completed": len(self._episode_infos),
+            "avg_success_duration": float(np.mean(success_durations))
+            if success_durations
+            else 0.0,
+            "avg_fail_duration": float(np.mean(fail_durations))
+            if fail_durations
+            else 0.0,
+            "has_truck_metrics": has_truck_metrics,
             # Grasp/drop averages
-            'avg_successful_grasps': float(np.mean(successful_grasps)) if successful_grasps else 0.0,
-            'avg_failed_grasps': float(np.mean(failed_grasps)) if failed_grasps else 0.0,
-            'avg_failed_drops': float(np.mean(failed_drops)) if failed_drops else 0.0,
+            "avg_successful_grasps": float(np.mean(successful_grasps))
+            if successful_grasps
+            else 0.0,
+            "avg_failed_grasps": float(np.mean(failed_grasps))
+            if failed_grasps
+            else 0.0,
+            "avg_failed_drops": float(np.mean(failed_drops)) if failed_drops else 0.0,
         }
-        
+
         # Log iteration summary
         log.info(
             "Iteration summary: %d episodes completed, status breakdown: %s",
             len(self._episode_infos),
-            status_counts
+            status_counts,
         )
         log.debug(
             "Metrics: PPH=%.2f, task_completion=%.4f, success_rate=%.4f",
-            metrics['avg_pieces_per_hour'],
-            metrics['avg_task_completion'],
-            metrics['custom_success_rate']
+            metrics["avg_pieces_per_hour"],
+            metrics["avg_task_completion"],
+            metrics["custom_success_rate"],
         )
-        
+
         # Clear episode infos for next iteration
         self._episode_infos = []
-        
+
         return metrics
 
     def run(self):
         """Override run to add custom metric tracking."""
-        from util.timer import Timer
-        import math
-        import einops
-        import torch
-        import pickle
-        
         # Start training loop
         timer = Timer()
         run_results = []
@@ -462,12 +516,16 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
         while self.itr < self.n_train_itr:
             # Reinitialize environments periodically to reclaim leaked Drake memory
             # This must happen BEFORE the memory log to measure the effect
-            if self.env_reinit_freq > 0 and self.itr > 0 and self.itr % self.env_reinit_freq == 0:
+            if (
+                self.env_reinit_freq > 0
+                and self.itr > 0
+                and self.itr % self.env_reinit_freq == 0
+            ):
                 self._reinitialize_venv()
             # Clear episode infos for this iteration
             self._episode_infos = []
             self._episodes_this_iteration = 0
-            
+
             log.debug("=== Starting iteration %d/%d ===", self.itr, self.n_train_itr)
 
             # Define train or eval (computed early for meshcat naming)
@@ -481,31 +539,46 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     options_venv[env_ind]["video_path"] = os.path.join(
                         self.render_dir, f"itr-{self.itr}_trial-{env_ind}.mp4"
                     )
-            
+
             # Select random environments to save meshcats for this iteration
             # Only save meshcats at the specified frequency (like render.freq)
             meshcat_env_indices = []
-            if self.save_meshcat and self.approx_n_meshcats_saved > 0 and self.itr % self.meshcat_save_freq == 0:
+            if (
+                self.save_meshcat
+                and self.approx_n_meshcats_saved > 0
+                and self.itr % self.meshcat_save_freq == 0
+            ):
                 n_to_save = min(self.approx_n_meshcats_saved, self.n_envs)
-                meshcat_env_indices = list(np.random.choice(
-                    self.n_envs, n_to_save, replace=False
-                ))
+                meshcat_env_indices = list(
+                    np.random.choice(self.n_envs, n_to_save, replace=False)
+                )
                 for env_ind in meshcat_env_indices:
                     meshcat_path = os.path.join(
-                        self.meshcat_dir, f"itr-{self.itr}_{mode_str}_env-{env_ind}.html"
+                        self.meshcat_dir,
+                        f"itr-{self.itr}_{mode_str}_env-{env_ind}.html",
                     )
                     options_venv[env_ind]["meshcat_path"] = meshcat_path
                     log.debug("Meshcat enabled for env %d: %s", env_ind, meshcat_path)
 
             self.model.eval() if eval_mode else self.model.train()
             last_itr_eval = eval_mode
-            
-            log.debug("Iteration %d: eval_mode=%s, n_envs=%d, n_steps=%d", self.itr, eval_mode, self.n_envs, self.n_steps)
+
+            log.debug(
+                "Iteration %d: eval_mode=%s, n_envs=%d, n_steps=%d",
+                self.itr,
+                eval_mode,
+                self.n_envs,
+                self.n_steps,
+            )
 
             # Reset env before iteration
             firsts_trajs = np.zeros((self.n_steps + 1, self.n_envs))
             if self.reset_at_iteration or eval_mode or last_itr_eval:
-                log.debug("Resetting all %d environments for iteration %d", self.n_envs, self.itr)
+                log.debug(
+                    "Resetting all %d environments for iteration %d",
+                    self.n_envs,
+                    self.itr,
+                )
                 prev_obs_venv = self.reset_env_all(options_venv=options_venv)
                 firsts_trajs[0] = 1
             else:
@@ -517,7 +590,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             obs_trajs = {
                 k: np.zeros(
                     (self.n_steps, self.n_envs, self.n_cond_step, *self.obs_dims[k]),
-                    dtype=np.float32
+                    dtype=np.float32,
                 )
                 for k in self.obs_dims
             }
@@ -529,7 +602,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     self.horizon_steps,
                     self.action_dim,
                 ),
-                dtype=np.float32
+                dtype=np.float32,
             )
             terminated_trajs = np.zeros((self.n_steps, self.n_envs), dtype=np.float32)
             reward_trajs = np.zeros((self.n_steps, self.n_envs), dtype=np.float32)
@@ -538,7 +611,6 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             for step in range(self.n_steps):
                 if step % 10 == 0:
                     log.info("Processed step %d of %d", step, self.n_steps)
-                    
 
                 # Select action
                 with torch.no_grad():
@@ -551,39 +623,44 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     # NOTE: Do NOT normalize here - MPIPolicyActorWrapper._encode_obs handles
                     # normalization internally, matching MPI's predict_action behavior.
                     # The training path (get_logprobs) also passes raw observations.
-                    
+
                     samples = self.model(
                         cond=cond,
                         deterministic=eval_mode,
                         return_chain=True,
                     )
                     output_venv = samples.trajectories.cpu().numpy()
-                    chains_venv = samples.chains.cpu().numpy() if samples.chains is not None else None
+                    chains_venv = (
+                        samples.chains.cpu().numpy()
+                        if samples.chains is not None
+                        else None
+                    )
                     action_venv = output_venv[:, : self.act_steps]
-                    
-                    # CRITICAL: Unnormalize actions using MPI policy normalizer
+
+                    # Unnormalize actions using MPI policy normalizer
                     # The diffusion model outputs normalized actions, but the environment
-                    # expects raw joint positions (with normalize_actions=False)
+                    # expects raw joint positions
                     action_venv_unnorm = self._unnormalize_actions(action_venv)
-                        
 
                 # Apply multi-step action
                 obs_venv, reward_venv, terminated_venv, truncated_venv, info_venv = (
                     self.venv.step(action_venv_unnorm)
                 )
                 done_venv = terminated_venv | truncated_venv
-                
+
                 # Debug log for environment step results
                 log.debug(
                     "Agent Step %d: rewards=%s, terminated=%s, truncated=%s",
-                    step, reward_venv, terminated_venv, truncated_venv
+                    step,
+                    reward_venv,
+                    terminated_venv,
+                    truncated_venv,
                 )
                 # self._save_debug_images(obs_venv["rgb"], self.itr, step)
 
-                
                 # Track custom metrics from info (only for episodes that ended)
                 self._compute_custom_metrics(info_venv, done_venv, step=step)
-                
+
                 for k in obs_trajs:
                     obs_trajs[k][step] = prev_obs_venv[k]
                 chains_trajs[step] = chains_venv
@@ -763,7 +840,9 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     torch.tensor(values_trajs, device=self.device).float().reshape(-1)
                 )
                 advantages_k = (
-                    torch.tensor(advantages_trajs, device=self.device).float().reshape(-1)
+                    torch.tensor(advantages_trajs, device=self.device)
+                    .float()
+                    .reshape(-1)
                 )
                 logprobs_k = torch.tensor(logprobs_trajs, device=self.device).float()
 
@@ -860,7 +939,7 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 explained_var = (
                     np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
                 )
-                
+
                 # Diagnostic logging for value function debugging
                 returns_mean = float(np.mean(y_true))
                 returns_std = float(np.std(y_true))
@@ -870,7 +949,12 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 advantages_std = float(advantages_k.std().cpu().numpy())
                 log.info(
                     "[Critic Diagnostics] Returns: mean=%.4f, std=%.4f | Values: mean=%.4f, std=%.4f | Advantages: mean=%.4f, std=%.4f",
-                    returns_mean, returns_std, values_mean, values_std, advantages_mean, advantages_std
+                    returns_mean,
+                    returns_std,
+                    values_mean,
+                    values_std,
+                    advantages_mean,
+                    advantages_std,
                 )
 
             # Update lr
@@ -900,11 +984,14 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 if eval_mode:
                     log.info(
                         "eval: success rate %8.4f | avg episode reward %8.4f | avg best reward %8.4f",
-                        success_rate, avg_episode_reward, avg_best_reward
+                        success_rate,
+                        avg_episode_reward,
+                        avg_best_reward,
                     )
                     log.info(
                         "      PPH %8.2f | task_completion %8.4f",
-                        custom_metrics['avg_pieces_per_hour'], custom_metrics['avg_task_completion']
+                        custom_metrics["avg_pieces_per_hour"],
+                        custom_metrics["avg_task_completion"],
                     )
                     if self.use_wandb:
                         eval_wandb_metrics = {
@@ -913,41 +1000,74 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                             "avg best reward - eval": avg_best_reward,
                             "num episode - eval": num_episode_finished,
                             # Custom metrics (both tasks)
-                            "custom_success_rate - eval": custom_metrics['custom_success_rate'],
-                            "n_episodes_completed - eval": custom_metrics['n_episodes_completed'],
-                            "avg_success_duration - eval": custom_metrics['avg_success_duration'],
-                            "avg_fail_duration - eval": custom_metrics['avg_fail_duration'],
+                            "custom_success_rate - eval": custom_metrics[
+                                "custom_success_rate"
+                            ],
+                            "n_episodes_completed - eval": custom_metrics[
+                                "n_episodes_completed"
+                            ],
+                            "avg_success_duration - eval": custom_metrics[
+                                "avg_success_duration"
+                            ],
+                            "avg_fail_duration - eval": custom_metrics[
+                                "avg_fail_duration"
+                            ],
                             # Grasp/drop averages
-                            "avg_successful_grasps - eval": custom_metrics['avg_successful_grasps'],
-                            "avg_failed_grasps - eval": custom_metrics['avg_failed_grasps'],
-                            "avg_failed_drops - eval": custom_metrics['avg_failed_drops'],
+                            "avg_successful_grasps - eval": custom_metrics[
+                                "avg_successful_grasps"
+                            ],
+                            "avg_failed_grasps - eval": custom_metrics[
+                                "avg_failed_grasps"
+                            ],
+                            "avg_failed_drops - eval": custom_metrics[
+                                "avg_failed_drops"
+                            ],
                         }
                         # Only log truck-specific metrics for truck unloading task
-                        if custom_metrics['has_truck_metrics']:
-                            eval_wandb_metrics["avg_pieces_per_hour - eval"] = custom_metrics['avg_pieces_per_hour']
-                            eval_wandb_metrics["avg_task_completion - eval"] = custom_metrics['avg_task_completion']
+                        if custom_metrics["has_truck_metrics"]:
+                            eval_wandb_metrics["avg_pieces_per_hour - eval"] = (
+                                custom_metrics["avg_pieces_per_hour"]
+                            )
+                            eval_wandb_metrics["avg_task_completion - eval"] = (
+                                custom_metrics["avg_task_completion"]
+                            )
                         wandb.log(eval_wandb_metrics, step=self.itr, commit=False)
                     run_results[-1]["eval_success_rate"] = success_rate
                     run_results[-1]["eval_episode_reward"] = avg_episode_reward
                     run_results[-1]["eval_best_reward"] = avg_best_reward
-                    run_results[-1]["eval_avg_success_duration"] = custom_metrics['avg_success_duration']
-                    run_results[-1]["eval_avg_fail_duration"] = custom_metrics['avg_fail_duration']
+                    run_results[-1]["eval_avg_success_duration"] = custom_metrics[
+                        "avg_success_duration"
+                    ]
+                    run_results[-1]["eval_avg_fail_duration"] = custom_metrics[
+                        "avg_fail_duration"
+                    ]
                 else:
                     log.info(
                         "%d: step %8d | loss %8.4f | pg loss %8.4f | value loss %8.4f | bc loss %8.4f | reward %8.4f | eta %8.4f | t:%8.4f",
-                        self.itr, cnt_train_step, loss, pg_loss, v_loss, bc_loss, avg_episode_reward, eta, time
+                        self.itr,
+                        cnt_train_step,
+                        loss,
+                        pg_loss,
+                        v_loss,
+                        bc_loss,
+                        avg_episode_reward,
+                        eta,
+                        time,
                     )
-                    if custom_metrics['has_truck_metrics']:
+                    if custom_metrics["has_truck_metrics"]:
                         log.info(
                             "      PPH %8.2f | task_completion %8.4f | success_dur %6.2fs | fail_dur %6.2fs",
-                            custom_metrics['avg_pieces_per_hour'], custom_metrics['avg_task_completion'],
-                            custom_metrics['avg_success_duration'], custom_metrics['avg_fail_duration']
+                            custom_metrics["avg_pieces_per_hour"],
+                            custom_metrics["avg_task_completion"],
+                            custom_metrics["avg_success_duration"],
+                            custom_metrics["avg_fail_duration"],
                         )
                     else:
                         log.info(
                             "      success_rate %8.4f | success_dur %6.2fs | fail_dur %6.2fs",
-                            custom_metrics['custom_success_rate'],
-                            custom_metrics['avg_success_duration'], custom_metrics['avg_fail_duration']
+                            custom_metrics["custom_success_rate"],
+                            custom_metrics["avg_success_duration"],
+                            custom_metrics["avg_fail_duration"],
                         )
                     if self.use_wandb:
                         train_wandb_metrics = {
@@ -967,14 +1087,28 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                             "actor lr": self.actor_optimizer.param_groups[0]["lr"],
                             "critic lr": self.critic_optimizer.param_groups[0]["lr"],
                             # Custom metrics (both tasks)
-                            "custom_success_rate - train": custom_metrics['custom_success_rate'],
-                            "n_episodes_completed - train": custom_metrics['n_episodes_completed'],
-                            "avg_success_duration - train": custom_metrics['avg_success_duration'],
-                            "avg_fail_duration - train": custom_metrics['avg_fail_duration'],
+                            "custom_success_rate - train": custom_metrics[
+                                "custom_success_rate"
+                            ],
+                            "n_episodes_completed - train": custom_metrics[
+                                "n_episodes_completed"
+                            ],
+                            "avg_success_duration - train": custom_metrics[
+                                "avg_success_duration"
+                            ],
+                            "avg_fail_duration - train": custom_metrics[
+                                "avg_fail_duration"
+                            ],
                             # Grasp/drop averages
-                            "avg_successful_grasps - train": custom_metrics['avg_successful_grasps'],
-                            "avg_failed_grasps - train": custom_metrics['avg_failed_grasps'],
-                            "avg_failed_drops - train": custom_metrics['avg_failed_drops'],
+                            "avg_successful_grasps - train": custom_metrics[
+                                "avg_successful_grasps"
+                            ],
+                            "avg_failed_grasps - train": custom_metrics[
+                                "avg_failed_grasps"
+                            ],
+                            "avg_failed_drops - train": custom_metrics[
+                                "avg_failed_drops"
+                            ],
                             # Critic diagnostic metrics (for debugging value collapse)
                             "critic/returns_mean": returns_mean,
                             "critic/returns_std": returns_std,
@@ -984,14 +1118,21 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                             "critic/advantages_std": advantages_std,
                         }
                         # Only log truck-specific metrics for truck unloading task
-                        if custom_metrics['has_truck_metrics']:
-                            train_wandb_metrics["avg_pieces_per_hour - train"] = custom_metrics['avg_pieces_per_hour']
-                            train_wandb_metrics["avg_task_completion - train"] = custom_metrics['avg_task_completion']
+                        if custom_metrics["has_truck_metrics"]:
+                            train_wandb_metrics["avg_pieces_per_hour - train"] = (
+                                custom_metrics["avg_pieces_per_hour"]
+                            )
+                            train_wandb_metrics["avg_task_completion - train"] = (
+                                custom_metrics["avg_task_completion"]
+                            )
                         wandb.log(train_wandb_metrics, step=self.itr, commit=True)
                     run_results[-1]["train_episode_reward"] = avg_episode_reward
-                    run_results[-1]["train_avg_success_duration"] = custom_metrics['avg_success_duration']
-                    run_results[-1]["train_avg_fail_duration"] = custom_metrics['avg_fail_duration']
+                    run_results[-1]["train_avg_success_duration"] = custom_metrics[
+                        "avg_success_duration"
+                    ]
+                    run_results[-1]["train_avg_fail_duration"] = custom_metrics[
+                        "avg_fail_duration"
+                    ]
                 with open(self.result_path, "wb") as f:
                     pickle.dump(run_results, f)
             self.itr += 1
-
