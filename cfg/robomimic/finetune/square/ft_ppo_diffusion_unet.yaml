@@ -1,3 +1,5 @@
+# python script/run.py --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/robomimic/finetune/square --config-name=ft_ppo_diffusion_unet
+
 defaults:
   - _self_
 hydra:
@@ -27,7 +29,7 @@ env:
   name: ${env_name}
   best_reward_threshold_for_success: 1
   max_episode_steps: 400
-  save_video: False
+  save_video: True
   wrappers:
     robomimic_lowdim:
       normalization_path: ${normalization_path}
@@ -66,8 +68,8 @@ train:
   save_model_freq: 100
   val_freq: 10
   render:
-    freq: 1
-    num: 0
+    freq: 5
+    num: 5
   # PPO specific
   reward_scale_running: True
   reward_scale_const: 1.0
