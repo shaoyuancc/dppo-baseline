@@ -67,7 +67,7 @@ use_ddim: false
 # Environment Configuration - MINIMAL for testing
 #==============================================================================
 env:
-  n_envs: 10
+  n_envs: 1
   name: ${env_name}
   env_type: truck_2d
   best_reward_threshold_for_success: 0.405
@@ -87,7 +87,6 @@ env:
     enable_tracking_failure: false
     enable_penetration_failure: true
     max_penetration_distance: 0.1
-    full_trajectory_mode: false
     act_steps: ${act_steps}
     reward_config:
       step_reward: -0.1
@@ -125,9 +124,9 @@ shape_meta:
 # Training Configuration - MINIMAL for testing
 #==============================================================================
 train:
-  n_train_itr: 5
-  n_critic_warmup_itr: 2
-  n_steps: 60
+  n_train_itr: 1
+  n_critic_warmup_itr: 1
+  n_steps: 10
   gamma: 0.999
   augment: false
   grad_accumulate: 1

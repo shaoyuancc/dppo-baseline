@@ -95,6 +95,40 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 self.env_reinit_freq,
             )
 
+        # Fixed eval mode: when enabled, iterate through eval instances sequentially
+        # instead of random sampling. Eval runs until all instances are completed.
+        # Instances are distributed across envs using strided assignment.
+        # Config is in env.specific (same place as other env-specific params)
+        env_specific = getattr(cfg.env, "specific", {})
+        self.use_fixed_eval_instances = env_specific.get("use_fixed_eval_instances", False)
+        eval_range = env_specific.get("eval_problem_index_range", None)
+        if eval_range is not None:
+            self.eval_problem_index_range = tuple(eval_range)
+            n_eval = self.eval_problem_index_range[1] - self.eval_problem_index_range[0]
+            log.info(
+                "Fixed eval mode enabled: will evaluate %d instances in range [%d, %d) "
+                "distributed across %d envs",
+                n_eval,
+                self.eval_problem_index_range[0],
+                self.eval_problem_index_range[1],
+                self.n_envs,
+            )
+        else:
+            self.eval_problem_index_range = None
+
+        # Detect if using full_trajectory_multi_step wrapper
+        # When using this wrapper, we need to pass the FULL horizon output
+        # (not sliced to act_steps) for smooth trajectory velocity at boundaries
+        wrappers_cfg = cfg.env.get("wrappers", {})
+        self.use_full_trajectory_mode = "full_trajectory_multi_step" in wrappers_cfg
+        if self.use_full_trajectory_mode:
+            log.info(
+                "Full trajectory mode enabled: passing full horizon_steps=%d "
+                "(not act_steps=%d) to environment for smooth trajectory creation",
+                self.horizon_steps,
+                self.act_steps,
+            )
+
         # Validate that policy normalizer is loaded for action unnormalization
         if self.policy_normalizer is None:
             log.warning(
@@ -119,6 +153,39 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                             stats["min"].cpu().numpy(),
                             stats["max"].cpu().numpy(),
                         )
+
+    def _reset_env_eval_state(self):
+        """Reset eval state for all environments (for fixed eval mode).
+        
+        Uses async call mechanism to reset state in subprocess environments.
+        """
+        self.venv.call_async("reset_eval_state")
+        self.venv.call_wait()
+
+    def _check_eval_complete(self) -> bool:
+        """
+        Check if ALL environments have completed their fixed eval instances.
+        
+        With strided assignment, each env handles a subset of instances.
+        Returns True only when ALL envs have finished their assigned instances.
+        """
+        self.venv.call_async("is_eval_complete")
+        results = self.venv.call_wait()
+        return all(results)
+
+    def _get_eval_progress(self) -> str:
+        """Get aggregate eval progress string for logging."""
+        self.venv.call_async("get_eval_progress")
+        results = self.venv.call_wait()
+        
+        # Each result is (completed_by_this_env, total_for_this_env)
+        # Sum across all envs for global progress
+        total_completed = sum(r[0] for r in results if r is not None)
+        total_instances = sum(r[1] for r in results if r is not None)
+        
+        if total_instances == 0:
+            return "N/A"
+        return f"{total_completed}/{total_instances}"
 
     def _save_debug_images(self, rgb: torch.Tensor, itr: int, step: int):
         """
@@ -338,7 +405,8 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     )
 
             # Only record episode info when the episode actually ended
-            if episode_ended:
+            # Skip idle episodes (env completed all eval instances and is waiting)
+            if episode_ended and status != "idle":
                 self._episodes_this_iteration += 1
 
                 ep_info = {
@@ -579,6 +647,17 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                     self.n_envs,
                     self.itr,
                 )
+                # Pass eval_mode and env_id to environments for fixed eval instance selection
+                # Each env gets a unique ID for strided instance assignment
+                for env_id, opt in enumerate(options_venv):
+                    opt["eval_mode"] = eval_mode
+                    opt["env_id"] = env_id
+                    opt["n_envs"] = self.n_envs
+                
+                # Reset eval state at start of eval iteration (for fixed eval mode)
+                if eval_mode and self.use_fixed_eval_instances:
+                    self._reset_env_eval_state()
+                
                 prev_obs_venv = self.reset_env_all(options_venv=options_venv)
                 firsts_trajs[0] = 1
             else:
@@ -608,9 +687,28 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
             reward_trajs = np.zeros((self.n_steps, self.n_envs), dtype=np.float32)
 
             # Collect trajectories
-            for step in range(self.n_steps):
+            # In fixed eval mode, run until all eval instances are complete
+            # Otherwise, run for n_steps
+            use_fixed_eval = eval_mode and self.use_fixed_eval_instances
+            step = 0
+            
+            while True:
+                # Check termination condition
+                if use_fixed_eval:
+                    # In fixed eval mode, run until all instances complete
+                    if self._check_eval_complete():
+                        log.info("All eval instances completed after %d steps", step)
+                        break
+                else:
+                    # Normal mode: run for exactly n_steps
+                    if step >= self.n_steps:
+                        break
                 if step % 10 == 0:
-                    log.info("Processed step %d of %d", step, self.n_steps)
+                    if use_fixed_eval:
+                        progress = self._get_eval_progress()
+                        log.info("Processed step %d (eval progress: %s)", step, progress)
+                    else:
+                        log.info("Processed step %d of %d", step, self.n_steps)
 
                 # Select action
                 with torch.no_grad():
@@ -635,7 +733,14 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                         if samples.chains is not None
                         else None
                     )
-                    action_venv = output_venv[:, : self.act_steps]
+                    
+                    # When using full_trajectory_multi_step wrapper, pass the FULL horizon
+                    # to create smooth PiecewisePolynomial trajectories (like MPI).
+                    # Otherwise, slice to act_steps for regular multi_step wrapper.
+                    if self.use_full_trajectory_mode:
+                        action_venv = output_venv  # Full horizon for smooth velocities
+                    else:
+                        action_venv = output_venv[:, : self.act_steps]
 
                     # Unnormalize actions using MPI policy normalizer
                     # The diffusion model outputs normalized actions, but the environment
@@ -661,15 +766,24 @@ class TrainPPODiffusionTruck2DAgent(TrainPPOImgDiffusionAgent):
                 # Track custom metrics from info (only for episodes that ended)
                 self._compute_custom_metrics(info_venv, done_venv, step=step)
 
-                for k in obs_trajs:
-                    obs_trajs[k][step] = prev_obs_venv[k]
-                chains_trajs[step] = chains_venv
-                reward_trajs[step] = reward_venv
-                terminated_trajs[step] = terminated_venv
-                firsts_trajs[step + 1] = done_venv
+                # Store trajectories (only within the pre-allocated buffer)
+                if step < self.n_steps:
+                    for k in obs_trajs:
+                        obs_trajs[k][step] = prev_obs_venv[k]
+                    chains_trajs[step] = chains_venv
+                    reward_trajs[step] = reward_venv
+                    terminated_trajs[step] = terminated_venv
+                    # Filter out idle episodes from done tracking
+                    # Idle envs return done=True but shouldn't count as real episodes
+                    done_filtered = done_venv.copy()
+                    for env_idx, info in enumerate(info_venv):
+                        if info.get("idle", False):
+                            done_filtered[env_idx] = False
+                    firsts_trajs[step + 1] = done_filtered
 
                 prev_obs_venv = obs_venv
                 cnt_train_step += self.n_envs * self.act_steps if not eval_mode else 0
+                step += 1
 
             # Summarize episode rewards
             episodes_start_end = []

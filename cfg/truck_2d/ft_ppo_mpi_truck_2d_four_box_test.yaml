@@ -10,9 +10,9 @@
 #   cd /home/shaoyuan/Documents/Software/motion-policy-improvement
 #   poetry run python ../dppo-baseline/script/run.py \
 #       --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d \
-#       --config-name=ft_ppo_mpi_truck_2d_single_box_fresh_critic
-# python script/run.py --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_single_box_fresh_critic
-# python script/run.py --config-path=/teamspace/studios/this_studio/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_single_box_fresh_critic
+#       --config-name=ft_ppo_mpi_truck_2d_four_box_test
+# python script/run.py --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_four_box_test
+# python script/run.py --config-path=/teamspace/studios/this_studio/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_four_box_test
 
 defaults:
   - _self_
@@ -29,20 +29,25 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: single_box_ddim5_dense_reward_v2_actor_lr1e-5
-# logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-fresh/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
-logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
+name: four_box_ddpm
+logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d_four_box_test/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+# logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
-wandb:
-  entity: contact_placement
-  project: truck_2d-dppo
-  run: ${now:%Y-%m-%d}_${now:%H-%M-%S}_${name}
+wandb: null
+# wandb:
+#   entity: contact_placement
+#   project: truck_2d_four_box-dppo
+#   run: ${now:%Y-%m-%d}_${now:%H-%M-%S}_${name}
 
 #==============================================================================
 # MPI Checkpoint Paths (only policy needed - critic will be trained fresh)
 #==============================================================================
-base_policy_path: /teamspace/lightning_storage/cloud-experiments/2025-10-28/05-02-10_base_policy_val_networks_5K_4box_multiout16_policy_only_200Ksteps/iterations/0/policy_training/checkpoints/step_160000-val_loss_0.0072-val_ddim_mse_0.3591.ckpt
-policy_normalizer_path: /teamspace/lightning_storage/cloud-experiments/2025-10-28/05-02-10_base_policy_val_networks_5K_4box_multiout16_policy_only_200Ksteps/iterations/0/policy_training/normalizer.pt
+# On Lightning:
+# base_policy_path: /teamspace/lightning_storage/cloud-experiments/2025-10-28/05-02-10_base_policy_val_networks_5K_4box_multiout16_policy_only_200Ksteps/iterations/0/policy_training/checkpoints/step_160000-val_loss_0.0072-val_ddim_mse_0.3591.ckpt
+# policy_normalizer_path: /teamspace/lightning_storage/cloud-experiments/2025-10-28/05-02-10_base_policy_val_networks_5K_4box_multiout16_policy_only_200Ksteps/iterations/0/policy_training/normalizer.pt
+# On RLG machine:
+base_policy_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-10-28/05-02-10_base_policy_val_networks_5K_4box_multiout16_policy_only_200Ksteps/iterations/0/policy_training/checkpoints/step_160000-val_loss_0.0072-val_ddim_mse_0.3591.ckpt
+policy_normalizer_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-10-28/05-02-10_base_policy_val_networks_5K_4box_multiout16_policy_only_200Ksteps/iterations/0/policy_training/normalizer.pt
 # base_policy_path: /teamspace/lightning_storage/cloud-experiments/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/checkpoints/latest.ckpt
 # policy_normalizer_path: /teamspace/lightning_storage/cloud-experiments/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/normalizer.pt
 # base_policy_path: /home/shaoyuan/Documents/Software/motion-policy-improvement/outputs/2025-11-20/04-54-56_dagger_beam_search_post_exit_4box_multiout16_point_contact/iterations/14/policy_training/checkpoints/latest.ckpt
@@ -58,14 +63,14 @@ env_name: truck_2d
 obs_dim: 6
 action_dim: 5
 denoising_steps: 100
-ft_denoising_steps: 5
+ft_denoising_steps: 10
 cond_steps: 2
 img_cond_steps: 2
 critic_img_cond_steps: 1
 critic_n_obs_steps: 1
 horizon_steps: 32
 act_steps: 20
-use_ddim: true
+use_ddim: false
 
 #==============================================================================
 # Environment Configuration
@@ -76,43 +81,53 @@ env:
   env_type: truck_2d
   # Success threshold: with step_reward=-0.1 and act_steps=20, worst-case success
   # (on last step) gives episode_best_reward = -1.9/20 = -0.095. Timeout gives -0.1.
-  best_reward_threshold_for_success: 0.405
-  max_episode_steps: 200
+  best_reward_threshold_for_success: 3.9
+  max_episode_steps: 800
   save_video: false
   save_meshcat: true
-  meshcat_save_freq: 5  # Save meshcats every X iterations (like render.freq)
-  approx_n_meshcats_saved: 5
+  meshcat_save_freq: 1  # Save meshcats every X iterations (like render.freq)
+  approx_n_meshcats_saved: 10
   reinit_freq: 1  # Reinitialize environments every N iterations to reclaim leaked memory (0 to disable)
   specific:
-    problem_file: /teamspace/studios/this_studio/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl
-    # problem_file: /home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl
-    problem_index_range: [0, 145000]
+    # problem_file: /teamspace/studios/this_studio/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl
+    problem_file: /home/shaoyuan/Documents/Software/motion-policy-improvement/datasets/truck_2d/truck_2d_problems_med_147K.pkl
+    problem_index_range: [0, 145000]  # Training set (used when not in eval mode)
+    # Fixed eval mode: iterate through eval instances sequentially without random sampling
+    # When enabled, eval runs until all instances in eval_problem_index_range are completed
+    use_fixed_eval_instances: true
+    eval_problem_index_range: [145000, 145200]  # Same test set as MPI run_truck_unload_2d_debug.yaml
     control_timestep: 0.1
     physics_timestep: 0.002
     init_x: 1.0
-    max_boxes: 1
+    max_boxes: 4
     enable_tracking_failure: false
     enable_penetration_failure: true
     max_penetration_distance: 0.1
     act_steps: ${act_steps}
     reward_config:
       step_reward: -0.1
-      failure_reward: -20.0
-      success_reward: 10.0
+      failure_reward: -80.0
+      success_reward: 80.0
       # Dense reward mode
       dense_reward_enabled: true
-      grasp_reward: 1.0
-      failed_grasp_penalty: -1.0
-      drop_reward: 2.0
-      failed_drop_penalty: -2.0
+      grasp_reward: 5.0
+      failed_grasp_penalty: -5.0
+      drop_reward: 10
+      failed_drop_penalty: -10
       max_reward_distance: 3.0
       dense_reward_scale: 0.05
       # Binary: +reward if correct suction, -reward if wrong
       maintain_grasp_reward: 0.02
   wrappers:
-    multi_step:
+    # full_trajectory_multi_step: Passes entire action sequence to env.step_full_trajectory()
+    #   -> Creates smooth PiecewisePolynomial trajectory over ALL waypoints (like MPI)
+    #   -> IMPORTANT: Needs n_horizon_steps to receive full policy output for smooth velocities
+    # multi_step: Iterates through actions one at a time, calling env.step() for each
+    #   -> Each action creates a separate interpolation segment
+    full_trajectory_multi_step:
       n_obs_steps: ${cond_steps}
       n_action_steps: ${act_steps}
+      n_horizon_steps: ${horizon_steps}  # Full policy horizon for smooth trajectory creation
       max_episode_steps: ${env.max_episode_steps}
       reset_within_step: true
 
@@ -123,7 +138,7 @@ shape_meta:
     state:
       shape: [6]
     full_state:
-      shape: [19]
+      shape: [43] # 11 + max_boxes * 8
   action:
     shape: [5]
 
@@ -133,9 +148,9 @@ shape_meta:
 #       while the randomly-initialized critic learns initial value estimates
 #==============================================================================
 train:
-  n_train_itr: 201
-  n_critic_warmup_itr: 2
-  n_steps: 180
+  n_train_itr: 1
+  n_critic_warmup_itr: 1
+  n_steps: 80
   gamma: 0.999
   augment: false
   grad_accumulate: 20
@@ -143,13 +158,13 @@ train:
   actor_weight_decay: 0
   actor_lr_scheduler:
     first_cycle_steps: ${train.n_train_itr}
-    warmup_steps: 10
+    warmup_steps: 0
     min_lr: 1e-5
   critic_lr: 1e-3
   critic_weight_decay: 0
   critic_lr_scheduler:
     first_cycle_steps: ${train.n_train_itr}
-    warmup_steps: 10
+    warmup_steps: 0
     min_lr: 1e-3
   save_model_freq: 10
   val_freq: 10

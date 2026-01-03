@@ -105,7 +105,6 @@ env:
     enable_tracking_failure: false
     enable_penetration_failure: true
     max_penetration_distance: 0.1
-    full_trajectory_mode: false
     act_steps: ${act_steps}
     # Reward configuration for reach task
     reward_config:

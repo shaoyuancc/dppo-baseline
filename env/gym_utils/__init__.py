@@ -16,8 +16,9 @@ _TRUCK_2D_ENV_KWARGS = [
     'enable_penetration_failure', 'init_x',
     'reward_config',  # Reward configuration dict
     'max_boxes',  # Limit number of boxes per problem
-    'full_trajectory_mode',  # Use full trajectory execution like MPI
-    'act_steps',  # Number of steps to execute in full trajectory mode
+    'act_steps',  # Number of steps to execute in step_full_trajectory()
+    'use_fixed_eval_instances',  # Enable fixed eval instance mode (strided assignment)
+    'eval_problem_index_range',  # Range of problem indices for fixed eval mode
 ]
 
 
@@ -102,7 +103,14 @@ def _create_truck_2d_vectorized_env(
             "render.modes": ["human", "rgb_array"],
             "video.frames_per_second": 10,
         }
-        n_obs_steps = wrappers.multi_step.n_obs_steps if hasattr(wrappers, 'multi_step') else 1
+        # Get n_obs_steps from either multi_step or full_trajectory_multi_step wrapper
+        if hasattr(wrappers, 'multi_step'):
+            n_obs_steps = wrappers.multi_step.n_obs_steps
+        elif hasattr(wrappers, 'full_trajectory_multi_step'):
+            n_obs_steps = wrappers.full_trajectory_multi_step.n_obs_steps
+        else:
+            n_obs_steps = 1
+        # Use MultiStep for dummy env (it has the same observation space structure)
         return MultiStep(env=env, n_obs_steps=n_obs_steps)
     
     env_fns = [_make_env for _ in range(num_envs)]
