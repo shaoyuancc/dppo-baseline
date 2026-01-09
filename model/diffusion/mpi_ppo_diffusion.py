@@ -438,8 +438,11 @@ class MPIPPODiffusion(nn.Module):
         policy = hydra.utils.instantiate(cfg.policy)
         log.info("Created MPI policy: %s", type(policy).__name__)
 
-        # Load state dict (strip DDP "module." prefix)
-        state_dict = checkpoint.get("state_dicts", {}).get("model", {})
+        # Load state dict - prefer ema_model for inference (matches MPI behavior)
+        state_dict = checkpoint.get("state_dicts", {}).get("ema_model", None)
+        if state_dict is None:
+            log.warning("No ema_model found, falling back to model weights")
+            state_dict = checkpoint.get("state_dicts", {}).get("model", {})
         cleaned = {k.replace("module.", ""): v for k, v in state_dict.items()}
         policy.load_state_dict(cleaned)
         log.info("Loaded %d parameters", len(cleaned))
@@ -963,8 +966,25 @@ class MPIPPODiffusion(nn.Module):
         else:
             global_cond_ft = self.actor_ft._encode_obs(cond)
 
-        # Start from pure noise
-        x = torch.randn((B, self.horizon_steps, self.action_dim), device=device)
+        # CRITICAL FIX: Use per-environment generators for deterministic batched inference
+        # This ensures that batched processing produces the same results as serial processing
+        # Each environment gets its own generator seeded deterministically
+        if not hasattr(self, '_env_generators') or len(self._env_generators) < B:
+            # Create generators for each batch position (lazy initialization)
+            self._env_generators = [torch.Generator(device=device) for _ in range(B)]
+            # Seed them deterministically based on batch index
+            # Note: Actual per-episode seeding happens in the environment
+            # These generators maintain independent RNG state per batch position
+            base_seed = torch.initial_seed()
+            for i, gen in enumerate(self._env_generators):
+                gen.manual_seed(base_seed + i)
+
+        # Start from pure noise - generate per-environment to maintain RNG independence
+        # This prevents all environments from sharing the same RNG sequence
+        x = torch.stack([
+            torch.randn((self.horizon_steps, self.action_dim), device=device, generator=self._env_generators[i])
+            for i in range(B)
+        ], dim=0)
 
         # Collect chain if requested
         chain = [] if return_chain else None
@@ -999,7 +1019,18 @@ class MPIPPODiffusion(nn.Module):
             )
 
             # Scheduler step: x_t -> x_{t-1}
-            x = scheduler.step(noise_pred, t, x).prev_sample
+            # Process each environment separately to use per-environment generators
+            # This is necessary because scheduler.step() adds noise in DDPM
+            x_next = []
+            for i in range(B):
+                x_i = scheduler.step(
+                    noise_pred[i:i+1],
+                    t,
+                    x[i:i+1],
+                    generator=self._env_generators[i]
+                ).prev_sample
+                x_next.append(x_i)
+            x = torch.cat(x_next, dim=0)
 
             # Add to chain for finetuning steps
             if return_chain and t_val <= self.ft_denoising_steps:
@@ -1062,8 +1093,18 @@ class MPIPPODiffusion(nn.Module):
         # Get minimum sampling std
         min_sampling_denoising_std = self.get_min_sampling_denoising_std()
 
-        # Start from pure noise
-        x = torch.randn((B, self.horizon_steps, self.action_dim), device=device)
+        # CRITICAL FIX: Use per-environment generators (same as MPI scheduler path)
+        if not hasattr(self, '_env_generators') or len(self._env_generators) < B:
+            self._env_generators = [torch.Generator(device=device) for _ in range(B)]
+            base_seed = torch.initial_seed()
+            for i, gen in enumerate(self._env_generators):
+                gen.manual_seed(base_seed + i)
+
+        # Start from pure noise - generate per-environment
+        x = torch.stack([
+            torch.randn((self.horizon_steps, self.action_dim), device=device, generator=self._env_generators[i])
+            for i in range(B)
+        ], dim=0)
 
         # Timestep schedule depends on DDPM vs DDIM
         if self.use_ddim:
@@ -1112,10 +1153,11 @@ class MPIPPODiffusion(nn.Module):
                 else:
                     std = torch.clip(std, min=min_sampling_denoising_std)
 
-            # Sample
-            noise = torch.randn_like(x).clamp_(
-                -self.randn_clip_value, self.randn_clip_value
-            )
+            # Sample - use per-environment generators
+            noise = torch.stack([
+                torch.randn((self.horizon_steps, self.action_dim), device=device, generator=self._env_generators[i])
+                for i in range(B)
+            ], dim=0).clamp_(-self.randn_clip_value, self.randn_clip_value)
             x = mean + std * noise
 
             # Clamp at final step
