@@ -29,7 +29,7 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: four_box_ddim10_init_ema_weights
+name: four_box_ddim10_min_sampling_std_1e-2_min_logprobs_std_1e-2_actor_lr_1e-6
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-fresh/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
@@ -139,12 +139,12 @@ train:
   gamma: 0.999
   augment: false
   grad_accumulate: 20
-  actor_lr: 1e-5
+  actor_lr: 1e-6
   actor_weight_decay: 0
   actor_lr_scheduler:
     first_cycle_steps: ${train.n_train_itr}
     warmup_steps: 10
-    min_lr: 1e-5
+    min_lr: 1e-6
   critic_lr: 1e-3
   critic_weight_decay: 0
   critic_lr_scheduler:
