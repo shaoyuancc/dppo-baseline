@@ -29,7 +29,7 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: four_box_ddim10_min_sampling_std_1e-2_min_logprobs_std_1e-2_actor_lr_1e-6
+name: four_box_ddim10_single_box_rewards
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-fresh/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
@@ -76,7 +76,7 @@ env:
   env_type: truck_2d
   # Success threshold: with step_reward=-0.1 and act_steps=20, worst-case success
   # (on last step) gives episode_best_reward = -1.9/20 = -0.095. Timeout gives -0.1.
-  best_reward_threshold_for_success: 3.9
+  best_reward_threshold_for_success: 0.405
   max_episode_steps: 800
   save_video: false
   save_meshcat: true
@@ -97,14 +97,14 @@ env:
     act_steps: ${act_steps}
     reward_config:
       step_reward: -0.1
-      failure_reward: -80.0
-      success_reward: 80.0
+      failure_reward: -20.0
+      success_reward: 10.0
       # Dense reward mode
       dense_reward_enabled: true
-      grasp_reward: 5.0
-      failed_grasp_penalty: -5.0
-      drop_reward: 10
-      failed_drop_penalty: -10
+      grasp_reward: 1.0
+      failed_grasp_penalty: -1.0
+      drop_reward: 2
+      failed_drop_penalty: -2
       max_reward_distance: 3.0
       dense_reward_scale: 0.05
       # Binary: +reward if correct suction, -reward if wrong
@@ -139,7 +139,7 @@ train:
   gamma: 0.999
   augment: false
   grad_accumulate: 20
-  actor_lr: 1e-6
+  actor_lr: 1e-5
   actor_weight_decay: 0
   actor_lr_scheduler:
     first_cycle_steps: ${train.n_train_itr}
