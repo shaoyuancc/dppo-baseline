@@ -10,9 +10,9 @@
 #   cd /home/shaoyuan/Documents/Software/motion-policy-improvement
 #   poetry run python ../dppo-baseline/script/run.py \
 #       --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d \
-#       --config-name=ft_ppo_mpi_truck_2d_four_box
-# python script/run.py --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_four_box
-# python script/run.py --config-path=/teamspace/studios/this_studio/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_four_box
+#       --config-name=ft_ppo_mpi_truck_2d_two_box
+# python script/run.py --config-path=/home/shaoyuan/Documents/Software/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_two_box
+# python script/run.py --config-path=/teamspace/studios/this_studio/dppo-baseline/cfg/truck_2d --config-name=ft_ppo_mpi_truck_2d_two_box
 
 defaults:
   - _self_
@@ -29,13 +29,13 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: four_box_ddim10
+name: two_box_ddim10_singleboxrewards
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-fresh/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
 wandb:
   entity: contact_placement
-  project: truck_2d_four_box-dppo
+  project: truck_2d_two_box-dppo
   run: ${now:%Y-%m-%d}_${now:%H-%M-%S}_${name}
 
 #==============================================================================
@@ -81,7 +81,7 @@ env:
   # Success threshold: with step_reward=-0.1 and act_steps=20, worst-case success
   # (on last step) gives episode_best_reward = -1.9/20 = -0.095. Timeout gives -0.1.
   best_reward_threshold_for_success: 3.9
-  max_episode_steps: 800
+  max_episode_steps: 400
   save_video: false
   save_meshcat: true
   meshcat_save_freq: 5  # Save meshcats every X iterations (like render.freq)
@@ -101,14 +101,14 @@ env:
     act_steps: ${act_steps}
     reward_config:
       step_reward: -0.1
-      failure_reward: -80.0
-      success_reward: 80.0
+      failure_reward: -20.0
+      success_reward: 10.0
       # Dense reward mode
       dense_reward_enabled: true
-      grasp_reward: 5.0
-      failed_grasp_penalty: -5.0
-      drop_reward: 10
-      failed_drop_penalty: -10
+      grasp_reward: 1.0
+      failed_grasp_penalty: -1.0
+      drop_reward: 2.0
+      failed_drop_penalty: -2.0
       max_reward_distance: 3.0
       dense_reward_scale: 0.05
       # Binary: +reward if correct suction, -reward if wrong
