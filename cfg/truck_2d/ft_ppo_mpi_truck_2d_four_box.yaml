@@ -80,7 +80,7 @@ env:
   env_type: truck_2d
   # Success threshold: with step_reward=-0.1 and act_steps=20, worst-case success
   # (on last step) gives episode_best_reward = -1.9/20 = -0.095. Timeout gives -0.1.
-  best_reward_threshold_for_success: 3.9
+  best_reward_threshold_for_success: 0.405
   max_episode_steps: 800
   save_video: false
   save_meshcat: true
