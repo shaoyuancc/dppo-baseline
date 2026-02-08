@@ -29,7 +29,7 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_truck2d_agent.TrainPPODiffusionTruck2DAgent
 
-name: two_box_ddim10_dense_rewards_v3
+name: two_box_ddim10_dense_rewards_v3_min_logprob_denoising_std_5e-2_bc_loss_1e-2
 # logdir: ${oc.env:DPPO_LOG_DIR,outputs}/truck_2d-mpi-fresh/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 logdir: /teamspace/lightning_storage/cloud-experiments/${now:%Y-%m-%d}/${now:%H-%M-%S}_${seed}_${name}
 
@@ -168,6 +168,11 @@ train:
   update_epochs: 10
   vf_coef: 0.5
   target_kl: 1.0
+  # BC loss: anchors finetuned policy to pretrained policy to prevent cumulative drift
+  # Samples actions from frozen base policy and maximizes their probability under
+  # the current finetuned policy. Helps prevent performance collapse in long runs.
+  use_bc_loss: true
+  bc_loss_coeff: 0.01
 
 #==============================================================================
 # Model - MPI PPO Diffusion with FRESH CRITIC
@@ -207,7 +212,7 @@ model:
   clip_ploss_coef_rate: 3
   norm_adv: true
   min_sampling_denoising_std: 0.01
-  min_logprob_denoising_std: 0.01
+  min_logprob_denoising_std: 0.05
   denoised_clip_value: 1.0
   randn_clip_value: 3
 

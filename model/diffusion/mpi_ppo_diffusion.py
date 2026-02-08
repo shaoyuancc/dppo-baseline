@@ -1404,7 +1404,7 @@ class MPIPPODiffusion(nn.Module):
             oldvalues: Old value estimates
             advantages: Advantage estimates
             oldlogprobs: Old log probabilities
-            use_bc_loss: Whether to add BC loss (not implemented for MPI)
+            use_bc_loss: Whether to add BC loss (anchors policy to pretrained)
             reward_horizon: Action horizon for gradient
             critic_obs: Optional separate obs for critic
 
@@ -1427,8 +1427,29 @@ class MPIPPODiffusion(nn.Module):
         newlogprobs = newlogprobs.mean(dim=(-1, -2)).view(-1)
         oldlogprobs = oldlogprobs.mean(dim=(-1, -2)).view(-1)
 
-        # BC loss (not implemented for MPI)
+        # BC loss: anchors finetuned policy to pretrained policy
+        # See Eqn. 2 of https://arxiv.org/pdf/2403.03949.pdf
+        # Samples actions from frozen base policy, then maximizes their probability
+        # under the current finetuned policy. This prevents cumulative drift.
         bc_loss = 0
+        if use_bc_loss:
+            # Get counterfactual teacher actions from frozen base policy
+            samples = self.forward(
+                cond=obs,
+                deterministic=False,
+                return_chain=True,
+                use_base_policy=True,
+            )
+            # Get logprobs of teacher actions under the current finetuned policy
+            bc_logprobs = self.get_logprobs(
+                obs,
+                samples.chains,
+                get_ent=False,
+                use_base_policy=False,
+            )
+            bc_logprobs = bc_logprobs.clamp(min=-5, max=2)
+            bc_logprobs = bc_logprobs.mean(dim=(-1, -2)).view(-1)
+            bc_loss = -bc_logprobs.mean()
 
         # Normalize advantages
         if self.norm_adv:
