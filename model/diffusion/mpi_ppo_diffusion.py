@@ -1431,8 +1431,14 @@ class MPIPPODiffusion(nn.Module):
         # See Eqn. 2 of https://arxiv.org/pdf/2403.03949.pdf
         # Samples actions from frozen base policy, then maximizes their probability
         # under the current finetuned policy. This prevents cumulative drift.
+        #
+        # Uses get_logprobs_subsample (1 random denoising step per sample) instead
+        # of get_logprobs (all ft_denoising_steps per sample) to keep memory usage
+        # identical to the regular PPO path -- no batch expansion.
         bc_loss = 0
         if use_bc_loss:
+            B = next(iter(obs.values())).shape[0]
+
             # Get counterfactual teacher actions from frozen base policy
             samples = self.forward(
                 cond=obs,
@@ -1440,10 +1446,19 @@ class MPIPPODiffusion(nn.Module):
                 return_chain=True,
                 use_base_policy=True,
             )
+            # Subsample one random denoising step per sample (same pattern as PPO)
+            bc_denoising_inds = torch.randint(
+                0, self.ft_denoising_steps, (B,), device=self.device
+            )
+            bc_chains_prev = samples.chains[torch.arange(B), bc_denoising_inds]
+            bc_chains_next = samples.chains[torch.arange(B), bc_denoising_inds + 1]
+
             # Get logprobs of teacher actions under the current finetuned policy
-            bc_logprobs = self.get_logprobs(
+            bc_logprobs = self.get_logprobs_subsample(
                 obs,
-                samples.chains,
+                bc_chains_prev,
+                bc_chains_next,
+                bc_denoising_inds,
                 get_ent=False,
                 use_base_policy=False,
             )
