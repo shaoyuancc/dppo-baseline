@@ -119,7 +119,7 @@ env:
 shape_meta:
   obs:
     rgb:
-      shape: [1, 71, 192]
+      shape: [1, 125, 224]
     state:
       shape: [6]
     full_state:
@@ -187,7 +187,7 @@ model:
 
     # RESNET18 VALUE NETWORK
     _target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork
-    img_shape: [1, 71, 192]
+    img_shape: [1, 125, 224]
     state_dim: 6
     features_dim: 512
     use_tanh: false  # <-- IMPORTANT: Disable Tanh for PPO (need unbounded values)
@@ -199,8 +199,8 @@ model:
     #   obs_shape: ${shape_meta.obs.rgb.shape}
     #   # num_channel = C * img_cond_steps (grayscale * history frames)
     #   num_channel: ${critic_img_cond_steps}
-    #   img_h: 71
-    #   img_w: 192
+    #   img_h: 125
+    #   img_w: 224
     #   cfg:
     #     patch_size: 8
     #     depth: 1

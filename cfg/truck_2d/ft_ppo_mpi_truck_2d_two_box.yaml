@@ -123,7 +123,7 @@ env:
 shape_meta:
   obs:
     rgb:
-      shape: [1, 71, 192]
+      shape: [1, 125, 224]
     state:
       shape: [6]
     full_state:
@@ -190,7 +190,7 @@ model:
   critic:
     # This instantiates a fresh ResNet18-based value network
     _target_: value_network.models.resnet18_tv_truck_2d_value_network.ResNet18TVTruck2dValueNetwork
-    img_shape: [1, 71, 192]
+    img_shape: [1, 125, 224]
     state_dim: 6
     features_dim: 512
     use_tanh: false  # <-- IMPORTANT: Disable Tanh for PPO (need unbounded values)

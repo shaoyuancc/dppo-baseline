@@ -104,7 +104,7 @@ env:
 shape_meta:
   obs:
     rgb:
-      shape: [1, 71, 192]
+      shape: [1, 125, 224]
     state:
       shape: [6]
   action:
@@ -164,8 +164,8 @@ model:
       _target_: model.common.vit.VitEncoder
       obs_shape: ${shape_meta.obs.rgb.shape}
       num_channel: ${critic_img_cond_steps}
-      img_h: 71
-      img_w: 192
+      img_h: 125
+      img_w: 224
       cfg:
         patch_size: 8
         depth: 1

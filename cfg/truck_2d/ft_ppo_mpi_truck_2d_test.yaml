@@ -88,7 +88,7 @@ env:
 shape_meta:
   obs:
     rgb:
-      shape: [1, 71, 192]
+      shape: [1, 125, 224]
     state:
       shape: [6]
   action:
